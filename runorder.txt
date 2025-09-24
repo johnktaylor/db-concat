@@ -1,0 +1,7 @@
+# This is a comment and should be ignored
+
+1.sql
+
+# Another commented line
+2.sql
+3.sql

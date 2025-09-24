@@ -1,0 +1,1 @@
+concat ..\${CLI_VAR}.sql
