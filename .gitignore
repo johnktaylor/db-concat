@@ -1,0 +1,23 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+GEMINI.md
+/tests/output*.sql
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when run with the -o flag
+*.out
+
+# Our specific output files
+concatenated_from_dsl_with_text.sql
+
+# Our specific executable names
+db-concat
+db-concat.exe
+
+# Temporary files
+runorder.tmp
