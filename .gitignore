@@ -4,8 +4,7 @@
 *.dll
 *.so
 *.dylib
-GEMINI.md
-/tests/output*.sql
+
 # Test binary, built with `go test -c`
 *.test
 

@@ -1,0 +1,1 @@
+HelloFromPrintSELECT 1;

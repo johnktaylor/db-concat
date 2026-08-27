@@ -13,6 +13,7 @@ type testCase struct {
 	name          string
 	instructions  string
 	output        string
+	resultFile    string
 	expected      string
 	args          []string
 	shouldFail    bool
@@ -21,6 +22,7 @@ type testCase struct {
 	expectedError string
 }
 
+// main builds the executable, runs all integration cases, reports their results, and exits nonzero when any fail.
 func main() {
 	executableName := "db-concat"
 	if runtime.GOOS == "windows" {
@@ -32,6 +34,7 @@ func main() {
 	}
 
 	fmt.Println("Building db-concat...")
+	// Build the executable under test before launching isolated integration cases.
 	buildCmd := exec.Command("go", "build", "-o", executablePath, ".")
 	buildOutput, err := buildCmd.CombinedOutput()
 	if err != nil {
@@ -46,6 +49,13 @@ func main() {
 			output:       "tests/output_param_file.sql",
 			expected:     "tests/expected_output_param_file.sql",
 			args:         []string{"--param-file", "tests/params.txt"},
+		},
+		{
+			name:         "DSL param overrides Parameter File",
+			instructions: "tests/instructions_param_overrides_file.dsl",
+			output:       "tests/output_param_overrides_file.sql",
+			expected:     "tests/expected_output_param_overrides_file.sql",
+			args:         []string{"--param-file", "tests/params_param_override.txt"},
 		},
 		{
 			name:         "Command-line Parameters (--param)",
@@ -99,12 +109,27 @@ func main() {
 			args:         []string{"--output", "tests/output_file.sql"},
 		},
 		{
+			name:         "Command-line output overrides DSL output",
+			instructions: "tests/instructions_output_precedence.dsl",
+			resultFile:   "tests/output_cli_output_precedence.sql",
+			expected:     "tests/expected_output_file.sql",
+			args:         []string{"--output", "tests/output_cli_output_precedence.sql"},
+		},
+		{
 			name:          "Unclosed if block",
 			instructions:  "tests/instructions_unclosed_if.dsl",
 			output:        "tests/output_error_unclosed_if.sql",
 			shouldFail:    true,
 			stderrFile:    "tests/error_unclosed_if.txt",
 			expectedError: "unclosed if block(s)",
+		},
+		{
+			name:          "Unclosed text block",
+			instructions:  "tests/instructions_unclosed_text_block.dsl",
+			output:        "tests/output_error_unclosed_text_block.sql",
+			shouldFail:    true,
+			stderrFile:    "tests/error_unclosed_text_block.txt",
+			expectedError: "unclosed text block",
 		},
 		{
 			name:          "Unknown command",
@@ -140,6 +165,12 @@ func main() {
 			expected:     "tests/expected_output_emit.sql",
 		},
 		{
+			name:         "Concat preserves literal @@ escapes in filenames",
+			instructions: "tests/instructions_concat_literal_atat.dsl",
+			output:       "tests/output_concat_literal_atat.sql",
+			expected:     "tests/expected_output_concat_literal_atat.sql",
+		},
+		{
 			name:         "Prefix commands (set-prefix, clear-prefix)",
 			instructions: "tests/instructions_prefix.dsl",
 			output:       "tests/output_prefix.sql",
@@ -157,9 +188,126 @@ func main() {
 			output:       "tests/output_numerical_if.sql",
 			expected:     "tests/expected_output_numerical_if.sql",
 		},
+		{
+			name:         "Processing-time substitution",
+			instructions: "tests/instructions_processing_time_substitution.dsl",
+			output:       "tests/output_processing_time_substitution.sql",
+			expected:     "tests/expected_output_processing_time_substitution.sql",
+		},
+		{
+			name:         "Include path parameter substitution",
+			instructions: "tests/instructions_include_substitution.dsl",
+			output:       "tests/output_include_substitution.sql",
+			expected:     "tests/expected_output_include_substitution.sql",
+		},
+		{
+			name:          "Print missing parameter",
+			instructions:  "tests/instructions_print_missing.dsl",
+			output:        "tests/output_print_missing.sql",
+			shouldFail:    true,
+			stderrFile:    "tests/error_print_missing.txt",
+			expectedError: "parameter not found",
+		},
+		{
+			name:         "Relative DSL output path resolution",
+			instructions: "tests/relative_output/instructions_relative_output.dsl",
+			resultFile:   "tests/relative_output/generated/out.sql",
+			expected:     "tests/expected_output_relative_output.sql",
+		},
+		{
+			name:         "Prefixed text-end is required",
+			instructions: "tests/instructions_prefix_text_block.dsl",
+			output:       "tests/output_prefix_text_block.sql",
+			expected:     "tests/expected_output_prefix_text_block.sql",
+		},
+		{
+			name:          "Invalid output command format",
+			instructions:  "tests/instructions_invalid_output.dsl",
+			output:        "tests/output_invalid_output.sql",
+			shouldFail:    true,
+			stderrFile:    "tests/error_invalid_output.txt",
+			expectedError: "invalid output command format",
+		},
+		{
+			name:          "Invalid concat command format",
+			instructions:  "tests/instructions_invalid_concat.dsl",
+			output:        "tests/output_invalid_concat.sql",
+			shouldFail:    true,
+			stderrFile:    "tests/error_invalid_concat.txt",
+			expectedError: "invalid concat command format",
+		},
+		{
+			name:          "Invalid include command format",
+			instructions:  "tests/instructions_invalid_include.dsl",
+			output:        "tests/output_invalid_include.sql",
+			shouldFail:    true,
+			stderrFile:    "tests/error_invalid_include.txt",
+			expectedError: "invalid include command format",
+		},
+		{
+			name:          "Invalid print command format",
+			instructions:  "tests/instructions_invalid_print.dsl",
+			output:        "tests/output_invalid_print.sql",
+			shouldFail:    true,
+			stderrFile:    "tests/error_invalid_print.txt",
+			expectedError: "invalid print command format",
+		},
+		{
+			name:          "Invalid if command format",
+			instructions:  "tests/instructions_invalid_if.dsl",
+			output:        "tests/output_invalid_if.sql",
+			shouldFail:    true,
+			stderrFile:    "tests/error_invalid_if.txt",
+			expectedError: "invalid if command format",
+		},
+		{
+			name:          "Invalid else command format",
+			instructions:  "tests/instructions_invalid_else.dsl",
+			output:        "tests/output_invalid_else.sql",
+			shouldFail:    true,
+			stderrFile:    "tests/error_invalid_else.txt",
+			expectedError: "invalid else command format",
+		},
+		{
+			name:          "Duplicate else command",
+			instructions:  "tests/instructions_duplicate_else.dsl",
+			shouldFail:    true,
+			expectedError: "duplicate else for if block",
+		},
+		{
+			name:          "Include cycle",
+			instructions:  "tests/instructions_include_cycle.dsl",
+			shouldFail:    true,
+			expectedError: "include cycle detected",
+		},
+		{
+			name:          "Invalid endif command format",
+			instructions:  "tests/instructions_invalid_endif.dsl",
+			output:        "tests/output_invalid_endif.sql",
+			shouldFail:    true,
+			stderrFile:    "tests/error_invalid_endif.txt",
+			expectedError: "invalid endif command format",
+		},
+		{
+			name:          "Invalid text-begin command format",
+			instructions:  "tests/instructions_invalid_text_begin.dsl",
+			output:        "tests/output_invalid_text_begin.sql",
+			shouldFail:    true,
+			stderrFile:    "tests/error_invalid_text_begin.txt",
+			expectedError: "invalid text-begin command format",
+		},
+		{
+			name:          "Invalid set-prefix command format",
+			instructions:  "tests/instructions_invalid_set_prefix.dsl",
+			output:        "tests/output_invalid_set_prefix.sql",
+			shouldFail:    true,
+			stderrFile:    "tests/error_invalid_set_prefix.txt",
+			expectedError: "invalid set-prefix command format",
+		},
 	}
 
 	failedTests := 0
+	// Run each case with separately captured output so failures identify the affected scenario.
 	for _, tc := range tests {
 		fmt.Printf("\n--- Test: %s ---\n", tc.name)
 
@@ -238,6 +386,8 @@ func main() {
 				var outputFilePath string
 				if tc.stdoutFile != "" {
 					outputFilePath = tc.stdoutFile
+				} else if tc.resultFile != "" {
+					outputFilePath = tc.resultFile
 				} else {
 					outputFilePath = tc.output
 				}
@@ -259,11 +409,13 @@ func main() {
 	fmt.Println("\nCleaning up generated test output files...")
 	// cleanup()
 
+	// Return a failing process status when any integration case did not meet its expectation.
 	if failedTests > 0 {
 		os.Exit(1)
 	}
 }
 
+// compareFiles compares two files after normalizing carriage returns and returns an I/O or mismatch error.
 func compareFiles(file1, file2 string) error {
 	// Read both files and normalize line endings by removing carriage returns.
 	content1, err := os.ReadFile(file1)
@@ -284,6 +436,7 @@ func compareFiles(file1, file2 string) error {
 	return nil
 }
 
+// cleanup removes generated test outputs and reports glob errors without returning a value.
 func cleanup() {
 	files, err := filepath.Glob("tests/output_*")
 	if err != nil {

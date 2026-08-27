@@ -9,10 +9,10 @@ The `db-concat` tool is designed to combine multiple SQL files and inline text i
 ## 2. General Syntax Rules
 
 *   **Line-Oriented:** Each command must reside on its own line.
-*   **Comments:** Lines starting with `#` are treated as comments and are ignored by the parser.
+*   **Comments:** Lines starting with `#` are treated as comments and are ignored by the parser. Inline trailing comments are not part of the language syntax and are not recognized unless the `#` is the first non-whitespace character on the line.
 *   **Whitespace:** Leading and trailing whitespace on a line is trimmed before parsing the command and its arguments.
 *   **Case-Sensitivity:** Commands are case-sensitive (e.g., `concat` is recognized, `CONCAT` is not).
-*   **Parameter Substitution:** Parameters can be referenced within command arguments using the `${KEY}` syntax. These will be substituted with their current values during processing.
+*   **Parameter Substitution:** Parameters can be referenced within command arguments using the `${KEY}` syntax. Substitution is performed when each command is processed, using the current parameter values at that point in execution. Later updates to parameters do not retroactively affect commands that have already been processed.
 
 ## 3. Commands
 
@@ -21,7 +21,7 @@ The `db-concat` tool is designed to combine multiple SQL files and inline text i
 *   **Purpose:** Specifies the path for the final concatenated output file.
 *   **Arguments:**
     *   `<filename>`: The path to the output file. This can be an absolute or relative path. Relative paths are resolved against the directory of the instruction file.
-*   **Behavior:** If this command is used, it overrides any `--output` command-line flag. If no `output` command is specified and no `--output` flag is provided, the output is written to `stdout`.
+*   **Behavior:** This command specifies the output path unless the caller supplies `--output`, which takes precedence. If neither is specified, the output is written to `stdout`.
 *   **Example:**
     ```dsl
     output ./build/final_schema.sql
@@ -32,7 +32,7 @@ The `db-concat` tool is designed to combine multiple SQL files and inline text i
 *   **Purpose:** Adds a SQL file to the list of files to be concatenated.
 *   **Arguments:**
     *   `<filename>`: The path to the SQL file. This can be an absolute or relative path. Relative paths are resolved against the directory of the instruction file.
-*   **Behavior:** The content of the specified file will be included in the final output at the point this command is processed in the instruction sequence. The file content is included as-is, without any additional newlines. To add a newline after the file, use the `emit` command (e.g., `emit @@n`).
+*   **Behavior:** The content of the specified file will be included in the final output at the point this command is processed in the instruction sequence. The file content is included as-is, without any additional newlines. Parameter substitution occurs in the filename, but `@@` escape sequences are not decoded there. To add a newline after the file, use the `emit` command (e.g., `emit @@n`).
 *   **Example:**
     ```dsl
     concat ../common/setup.sql
@@ -44,7 +44,7 @@ The `db-concat` tool is designed to combine multiple SQL files and inline text i
 *   **Purpose:** Includes and processes another DSL instruction file.
 *   **Arguments:**
     *   `<filename>`: The path to another DSL instruction file. This can be an absolute or relative path. Relative paths are resolved against the directory of the *current* instruction file.
-*   **Behavior:** The `db-concat` tool will pause processing the current file, process all commands in the included file, and then resume processing the current file from where it left off. Parameters defined in the included file will affect the current file and vice-versa.
+*   **Behavior:** The `db-concat` tool will pause processing the current file, process all commands in the included file, and then resume processing the current file from where it left off. Parameters defined in the included file will affect the current file and vice-versa. Including a file that is already active in the current include chain is an error.
 *   **Example:**
     ```dsl
     include common_instructions.dsl
@@ -54,8 +54,8 @@ The `db-concat` tool is designed to combine multiple SQL files and inline text i
 
 *   **Purpose:** Defines a block of inline text to be included directly in the output.
 *   **Arguments:** None for both commands.
-*   **Behavior:** All lines between `text-begin` and `text-end` (exclusive) will be treated as literal text and appended to the output. Each line within the block will have a newline character (\n) appended to it. Parameter substitution *does* occur within `text-begin`/`text-end` blocks.
-*   **Note:** Parameter substitution happens when the final output is generated, not when the text block is parsed.
+*   **Behavior:** All lines between `text-begin` and `text-end` (exclusive) will be treated as literal text and appended to the output. Each line within the block will have a newline character (\n) appended to it. Parameter substitution and `@@` escape decoding occur within `text-begin`/`text-end` blocks.
+*   **Note:** The text block is collected literally while parsing. Parameter substitution is applied when the `text-end` command is processed and the completed block is appended to the output stream. This uses the current parameter values at that moment.
 *   **Example:**
     ```dsl
     text-begin
@@ -70,7 +70,7 @@ The `db-concat` tool is designed to combine multiple SQL files and inline text i
 *   **Arguments:**
     *   `<key>`: The name of the parameter.
     *   `<value>`: The value to assign to the parameter. This value *does* undergo parameter substitution at the time of definition.
-*   **Behavior:** This command will only set the parameter if it has not already been defined by a command-line `--param` flag or a DSL `set` command. It overrides values from `--param-file`.
+*   **Behavior:** This command overrides values loaded from `--param-file` and earlier `param` commands. It does not override a command-line `--param` value or a value established by a DSL `set` command.
 *   **Example:**
     ```dsl
     param DB_VERSION=1.0.0
@@ -95,7 +95,8 @@ The `db-concat` tool is designed to combine multiple SQL files and inline text i
 *   **Purpose:** Outputs the value of a specified parameter directly into the concatenated output stream.
 *   **Arguments:**
     *   `<param_name>`: The name of the parameter whose value should be printed.
-*   **Behavior:** The current value of the parameter will be written to the output. This is useful for embedding dynamic information or for debugging.
+*   **Behavior:** The current value of the parameter named by the literal `<param_name>` argument will be written to the output. The parameter name does not undergo `${KEY}` substitution, but `@@` escape sequences in the resulting value are decoded. This is useful for embedding dynamic information or for debugging.
+*   **Error Handling:** If the parameter does not exist at the time the `print` command is processed, the tool must return an error.
 *   **Example:**
     ```dsl
     print CURRENT_SCHEMA
@@ -107,6 +108,7 @@ The `db-concat` tool is designed to combine multiple SQL files and inline text i
 *   **Arguments:**
     *   `<text>`: The string to be outputted.
 *   **Behavior:** This command does not automatically add a newline character. To add a newline, use the `@@n` special character. Parameter substitution (`${KEY}`) occurs within `<text>`. Special escape sequences `@@n` (newline), `@@r` (carriage return), `@@t` (tab), and `@@s` (space) are interpreted and converted to their respective characters.
+*   **Escape Decoding Scope:** The same `@@` decoding is also applied to text generated by `print` and `text-begin` blocks. `concat` filenames remain literal after parameter substitution.
 *   **Example:**
     ```dsl
     emit This is a line with a new line@@nand a tab@@tcharacter and a space@@scharacter.@@n
@@ -122,6 +124,7 @@ The `db-concat` tool is designed to combine multiple SQL files and inline text i
 *   **Behavior:**
     *   An `if` block starts with `if <condition>` and ends with `endif`.
     *   An optional `else` command can be used to define a block that executes if the preceding `if` condition was false.
+    *   At most one `else` command is permitted for each `if` block; a duplicate `else` is an error.
     *   `if` blocks can be nested.
 *   **Example:**
     ```dsl
@@ -157,6 +160,8 @@ The DSL provides a mechanism to namespace or scope commands within a single file
 ### `set-prefix <prefix>`
 
 When the `set-prefix` command is used, the DSL parser enters a "prefixed" mode for the current file. From that point on, any subsequent command will only be recognized and executed if it is explicitly prefixed with `<prefix>:`. Commands that are not prefixed will be ignored.
+
+This prefixed-mode rule applies to all commands, including block and control-flow delimiters such as `text-end`, `else`, `endif`, and `clear-prefix`.
 
 ### `<prefix>:clear-prefix`
 
@@ -206,23 +211,28 @@ concat other_file.sql
 
 ## 5. Parameter Handling and Precedence
 
-Parameters are key-value pairs that can be used to store dynamic information. They can be defined and overridden at different levels, with a clear precedence:
+Parameters are key-value pairs that can be used to store dynamic information. The implementation applies the following assignment rules:
 
 1.  **Command-line `--param <key>=<value>` flags (Highest Precedence):** These parameters are passed directly when running `db-concat`. A parameter set via a `--param` flag cannot be overridden by any DSL command (`param` or `set`).
 2.  **DSL `set <key>=<value>` commands:** These commands within the instruction file assign a new value to a parameter. They override parameters defined by `param` commands or loaded from `--param-file`. Values assigned via `set` undergo parameter substitution at the time of assignment.
-3.  **DSL `param <key>=<value>` commands:** These commands within the instruction file define parameters. They will only set the parameter if it has not already been defined by a command-line `--param` flag or a DSL `set` command. Their values undergo parameter substitution at the time of definition.
-4.  **`--param-file <filename>` (Lowest Precedence):** Parameters loaded from external files (one `key=value` pair per line) have the lowest precedence and are overridden by all other methods.
+3.  **DSL `param <key>=<value>` commands:** These commands override values from parameter files and earlier `param` commands, but not a command-line `--param` value or a value established by DSL `set`. Their values undergo parameter substitution at the time of definition.
+4.  **`--param-file <filename>` (Lowest Precedence):** Parameters loaded from external files (one `key=value` pair per line) are applied before DSL processing. When multiple parameter files define the same key, the later file wins. Their values can be overridden by either DSL command.
 
-**Parameter Substitution:** When a parameter is referenced using `${KEY}` syntax (e.g., `concat ${MY_FILE}.sql`), the tool will replace `${KEY}` with the current value of `MY_FILE` from its internal parameter map. This substitution occurs for arguments of `concat`, `include`, `output`, `set` (for the value being assigned), `emit`, and within `text-begin`/`text-end` blocks.
+**Parameter File Path Resolution:** Paths passed via `--param-file` are resolved relative to the current working directory of the `db-concat` process unless an absolute path is provided. They are not resolved relative to the instruction file.
 
-## 5. Error Handling
+**Parameter Substitution:** When a parameter is referenced using `${KEY}` syntax (e.g., `concat ${MY_FILE}.sql`), the tool will replace `${KEY}` with the current value of `MY_FILE` from its internal parameter map at the time the relevant command is processed. This substitution occurs for arguments of `concat`, `include`, `output`, `param`, `set` (for the value being assigned), and `emit`, and within `text-begin`/`text-end` blocks when the block is closed by `text-end`. `print` takes a literal parameter name and does not perform substitution. Later parameter updates do not change the meaning of already-processed commands.
+
+## 6. Error Handling
 
 The `db-concat` tool provides informative error messages for common issues:
 
 *   **Unknown Command:** If an unrecognized command is encountered in a DSL file.
 *   **Invalid Command Format:** If a command's arguments do not match the expected format (e.g., `param` without an `=`).
 *   **Unclosed If Block:** If an `if` command is not matched by an `endif`.
+*   **Unclosed Text Block:** If a `text-begin` command is not matched by a corresponding `text-end` before the end of the file.
 *   **Else Without If:** If an `else` command is encountered without a preceding `if`.
+*   **Duplicate Else:** If more than one `else` command is encountered for the same `if` block.
+*   **Include Cycle:** If an instruction file directly or indirectly includes a file already active in its include chain.
 *   **Parameter Not Found:** If a `print` command references a parameter that has not been defined.
 *   **File Not Found:** If `concat` or `include` commands reference files that do not exist.
 
@@ -244,10 +254,10 @@ include common/base_setup.dsl
 # Conditionally include environment-specific data
 if ENVIRONMENT=development
   concat data/dev_users.sql
-  set CURRENT_SCHEMA=dev_schema # Override schema for development
+  set CURRENT_SCHEMA=dev_schema
 else
   concat data/prod_users.sql
-  set CURRENT_SCHEMA=${DEFAULT_SCHEMA} # Use default for production
+  set CURRENT_SCHEMA=${DEFAULT_SCHEMA}
 endif
 
 # Print the current schema being used
