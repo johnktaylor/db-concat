@@ -1,16 +1,16 @@
 # Test Plan for db-concat
 
-This plan documents the automated integration cases in `tests/run_tests.go`. Each case builds `db-concat`, invokes it with the listed fixture category, and checks the stated result. File-content assertions compare the generated result with the corresponding `expected_*` fixture unless noted otherwise.
+This plan documents the automated integration cases in `tests/run_tests.go`, which are executed by Go's `TestIntegrationSuite` in `tests/run_tests_test.go`. Each case builds `db-concat`, invokes it with the listed fixture category, and checks the stated result. File-content assertions compare the generated result with the corresponding `expected_*` fixture unless noted otherwise.
 
 ## Running the Suite
 
 Run the suite from the project root:
 
 ```bash
-go run tests/run_tests.go
+go test ./...
 ```
 
-The runner writes its normal fixture outputs, captures stdout or stderr where required, checks expected failures, and removes only its explicitly listed transient artifacts.
+The Go test invokes the runner from the project root. The runner writes its normal fixture outputs, captures stdout or stderr where required, checks expected failures, and removes only its explicitly listed transient artifacts.
 
 ## Test Cases
 
@@ -66,4 +66,4 @@ The runner writes its normal fixture outputs, captures stdout or stderr where re
 
 ## Coverage Maintenance
 
-`tests/run_tests.go` is the source of truth for executable test cases. When a case is added, removed, or changed, update this table in the same change so that the case count, scenario, and expected result remain accurate.
+`tests/run_tests.go` is the source of truth for integration cases, and `tests/run_tests_test.go` exposes them to standard Go tooling. When a case is added, removed, or changed, update this table in the same change so that the case count, scenario, and expected result remain accurate.

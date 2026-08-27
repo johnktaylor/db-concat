@@ -126,10 +126,10 @@ concat 2.sql
 
 ## Running Tests
 
-To run the automated test suite, navigate to the `tests` directory and run the following command:
+Run the automated test suite from the project root:
 
 ```bash
-go run run_tests.go
+go test ./...
 ```
 
-The script will build the `db-concat` executable, run all defined test cases, and report the results.
+The Go test suite runs the integration harness, which builds the `db-concat` executable and executes all defined cases. Use `go test -v ./...` to display each case's output.
