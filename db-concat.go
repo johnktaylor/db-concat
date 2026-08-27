@@ -11,27 +11,29 @@ import (
 	"strings"
 )
 
+const maximumInputLineBytes = 1024 * 1024
+
 type ConcatItem struct {
-	IsFile  bool
-	Value   string
-	BaseDir string // Base directory used to resolve relative source-file paths.
+	IsFile        bool
+	ContentOrPath string
+	BaseDir       string // Base directory used to resolve relative source-file paths.
 }
 
 var (
-	paramFiles  string
-	paramsSlice stringArray
-	outputFlag  string
-	cliParamsSet map[string]bool // Tracks parameters set by CLI --param.
-	dslSetParams map[string]bool // Tracks parameters established by higher-precedence DSL set commands.
+	parameterFileList          string
+	commandLineParameterValues stringList
+	commandLineOutputFile      string
+	commandLineParameterNames  map[string]bool // Tracks parameters set by CLI --param.
+	dslSetParameterNames       map[string]bool // Tracks parameters established by higher-precedence DSL set commands.
 )
 
 // init registers command-line options and initializes global precedence state; it has no return value.
 func init() {
-	flag.StringVar(&paramFiles, "param-file", "", "Comma-separated list of parameter files (key=value per line)")
-	flag.Var(&paramsSlice, "param", "Key-value pair parameter (e.g., --param key=value). Can be specified multiple times.")
-	flag.StringVar(&outputFlag, "output", "", "Output file path. If not specified, output goes to stdout.")
-	cliParamsSet = make(map[string]bool) // Initialize the map
-	dslSetParams = make(map[string]bool)
+	flag.StringVar(&parameterFileList, "param-file", "", "Comma-separated list of parameter files (key=value per line)")
+	flag.Var(&commandLineParameterValues, "param", "Key-value pair parameter (e.g., --param key=value). Can be specified multiple times.")
+	flag.StringVar(&commandLineOutputFile, "output", "", "Output file path. If not specified, output goes to stdout.")
+	commandLineParameterNames = make(map[string]bool)
+	dslSetParameterNames = make(map[string]bool)
 }
 
 // main parses inputs, builds the concatenation plan, writes the requested output, and exits nonzero on failure.
@@ -53,12 +55,12 @@ func main() {
 	parameters := make(map[string]string)
 
 	// Load parameters from files (lowest precedence)
-	if paramFiles != "" {
-		files := strings.Split(paramFiles, ",")
-		for _, file := range files {
-			err := loadParamsFromFile(file, parameters)
+	if parameterFileList != "" {
+		parameterFiles := strings.Split(parameterFileList, ",")
+		for _, parameterFile := range parameterFiles {
+			err := loadParamsFromFile(parameterFile, parameters)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error loading parameters from file %s: %v\n", file, err)
+				fmt.Fprintf(os.Stderr, "Error loading parameters from file %s: %v\n", parameterFile, err)
 				os.Exit(1)
 			}
 		}
@@ -66,12 +68,14 @@ func main() {
 
 	// Load parameters from command line (highest precedence) before processing DSL instructions
 	// Apply CLI values before DSL parsing so DSL commands cannot override them.
-	for _, p := range paramsSlice {
-		parts := strings.SplitN(p, "=", 2)
-		if len(parts) == 2 {
-			parameters[parts[0]] = parts[1]
-			cliParamsSet[parts[0]] = true // Mark this parameter as set by CLI
+	for _, parameterArgument := range commandLineParameterValues {
+		parameterParts := strings.SplitN(parameterArgument, "=", 2)
+		if len(parameterParts) != 2 || parameterParts[0] == "" {
+			fmt.Fprintf(os.Stderr, "Invalid --param value %q: expected key=value with a non-empty key\n", parameterArgument)
+			os.Exit(1)
 		}
+		parameters[parameterParts[0]] = parameterParts[1]
+		commandLineParameterNames[parameterParts[0]] = true
 	}
 
 	var dslOutputFile string
@@ -86,30 +90,48 @@ func main() {
 
 	finalOutputFile := dslOutputFile
 	// An explicit CLI destination overrides the instruction-file default.
-	if outputFlag != "" {
-		finalOutputFile = outputFlag
+	if commandLineOutputFile != "" {
+		finalOutputFile = commandLineOutputFile
 	}
 
-	var outputWriter io.Writer
-	if finalOutputFile == "" {
-		outputWriter = os.Stdout
-	} else {
-		outFile, err := os.Create(finalOutputFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating output file %s: %v\n", finalOutputFile, err)
-			os.Exit(1)
-		}
-		defer outFile.Close()
-		outputWriter = outFile
-	}
-
-	// Materialize the complete plan only after all instructions have parsed successfully.
-	err = runConcat(outputWriter, itemsToConcat, parameters)
+	// Materialize the complete plan without replacing a file destination until every item succeeds.
+	err = writeOutput(finalOutputFile, itemsToConcat, parameters)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error during concatenation: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error writing output: %v\n", err)
 		os.Exit(1)
 	}
 
+}
+
+// writeOutput writes planned items to stdout or atomically replaces finalOutputFile after a successful file write.
+func writeOutput(finalOutputFile string, itemsToConcat []ConcatItem, parameters map[string]string) error {
+	if finalOutputFile == "" {
+		return runConcat(os.Stdout, itemsToConcat, parameters)
+	}
+
+	// Create the temporary file beside the destination so a successful rename stays on the same filesystem.
+	temporaryOutput, err := os.CreateTemp(filepath.Dir(finalOutputFile), "."+filepath.Base(finalOutputFile)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("error creating temporary output file for %s: %v", finalOutputFile, err)
+	}
+	temporaryOutputPath := temporaryOutput.Name()
+	defer func() {
+		temporaryOutput.Close()
+		os.Remove(temporaryOutputPath)
+	}()
+
+	if err := runConcat(temporaryOutput, itemsToConcat, parameters); err != nil {
+		return err
+	}
+	if err := temporaryOutput.Close(); err != nil {
+		return fmt.Errorf("error closing temporary output file %s: %v", temporaryOutputPath, err)
+	}
+	if err := os.Rename(temporaryOutputPath, finalOutputFile); err != nil {
+		return fmt.Errorf("error replacing output file %s: %v", finalOutputFile, err)
+	}
+
+	fmt.Fprintln(os.Stdout, "Successfully concatenated files to output.")
+	return nil
 }
 
 // loadParamsFromFile reads key=value entries from filename into parameters and returns parsing or I/O errors.
@@ -121,15 +143,17 @@ func loadParamsFromFile(filename string, parameters map[string]string) error {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	// Permit generated parameter values while retaining a bounded per-line memory limit.
+	scanner.Buffer(make([]byte, 64*1024), maximumInputLineBytes)
 	// Skip comments and blank lines while preserving literal parameter values.
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			parameters[parts[0]] = parts[1]
+		parameterParts := strings.SplitN(line, "=", 2)
+		if len(parameterParts) == 2 && strings.TrimSpace(parameterParts[0]) != "" {
+			parameters[parameterParts[0]] = parameterParts[1]
 		} else {
 			return fmt.Errorf("invalid parameter file line format: %s", line)
 		}
@@ -137,22 +161,22 @@ func loadParamsFromFile(filename string, parameters map[string]string) error {
 	return scanner.Err()
 }
 
-type stringArray []string
+type stringList []string
 
 // String returns the flag values as a comma-separated string for flag.Value display.
-func (i *stringArray) String() string {
-	return strings.Join(*i, ",")
+func (values *stringList) String() string {
+	return strings.Join(*values, ",")
 }
 
 // Set appends one command-line flag value and always returns nil.
-func (i *stringArray) Set(value string) error {
-	*i = append(*i, value)
+func (values *stringList) Set(value string) error {
+	*values = append(*values, value)
 	return nil
 }
 
-// substituteParams replaces known ${key} references in s using parameters and returns the substituted text.
-func substituteParams(s string, parameters map[string]string) string {
-	result := s
+// substituteParams replaces known ${key} references in text using parameters and returns the substituted text.
+func substituteParams(text string, parameters map[string]string) string {
+	result := text
 	// Substitute every currently defined key without recursively expanding replacement values.
 	for key, value := range parameters {
 		result = strings.ReplaceAll(result, "$"+"{"+key+"}", value)
@@ -160,43 +184,43 @@ func substituteParams(s string, parameters map[string]string) string {
 	return result
 }
 
-// unescapeString converts DSL @@ escape sequences in s and returns the decoded text.
-func unescapeString(s string) string {
-	s = strings.ReplaceAll(s, "@@n", "\n")
-	s = strings.ReplaceAll(s, "@@r", "\r")
-	s = strings.ReplaceAll(s, "@@t", "\t")
-	s = strings.ReplaceAll(s, "@@s", " ")
-	return s
+// unescapeString converts DSL @@ escape sequences in text and returns the decoded text.
+func unescapeString(text string) string {
+	text = strings.ReplaceAll(text, "@@n", "\n")
+	text = strings.ReplaceAll(text, "@@r", "\r")
+	text = strings.ReplaceAll(text, "@@t", "\t")
+	text = strings.ReplaceAll(text, "@@s", " ")
+	return text
 }
 
-type ifFrame struct {
+type conditionalFrame struct {
 	active   bool
 	elseSeen bool
 }
 
-type ifStack []ifFrame
+type conditionalStack []conditionalFrame
 
-// push adds one conditional execution state to s without returning a value.
-func (s *ifStack) push(val bool) {
-	*s = append(*s, ifFrame{active: val})
+// push adds one conditional execution state to stack without returning a value.
+func (stack *conditionalStack) push(isActive bool) {
+	*stack = append(*stack, conditionalFrame{active: isActive})
 }
 
-// pop removes and returns the most recent conditional state, or returns an error when s is empty.
-func (s *ifStack) pop() (ifFrame, error) {
-	if len(*s) == 0 {
-		return ifFrame{}, fmt.Errorf("pop on empty stack")
+// pop removes and returns the most recent conditional state, or returns an error when stack is empty.
+func (stack *conditionalStack) pop() (conditionalFrame, error) {
+	if len(*stack) == 0 {
+		return conditionalFrame{}, fmt.Errorf("pop on empty stack")
 	}
-	val := (*s)[len(*s)-1]
-	*s = (*s)[:len(*s)-1]
-	return val, nil
+	activeFrame := (*stack)[len(*stack)-1]
+	*stack = (*stack)[:len(*stack)-1]
+	return activeFrame, nil
 }
 
-// peek returns the most recent conditional state without removing it, or an error when s is empty.
-func (s *ifStack) peek() (ifFrame, error) {
-	if len(*s) == 0 {
-		return ifFrame{}, fmt.Errorf("peek on empty stack")
+// peek returns the most recent conditional state without removing it, or an error when stack is empty.
+func (stack *conditionalStack) peek() (conditionalFrame, error) {
+	if len(*stack) == 0 {
+		return conditionalFrame{}, fmt.Errorf("peek on empty stack")
 	}
-	return (*s)[len(*s)-1], nil
+	return (*stack)[len(*stack)-1], nil
 }
 
 // evaluateCondition evaluates a DSL comparison against parameters and returns its result or a format error.
@@ -207,11 +231,11 @@ func evaluateCondition(condition string, parameters map[string]string) (bool, er
 	// Prefer multi-character operators so their leading character is not parsed first.
 	for _, op := range operators {
 		if strings.Contains(condition, op) {
-			parts := strings.SplitN(condition, op, 2)
-			if len(parts) == 2 {
+			conditionParts := strings.SplitN(condition, op, 2)
+			if len(conditionParts) == 2 {
 				operator = op
-				key = parts[0]
-				expectedValue = parts[1]
+				key = conditionParts[0]
+				expectedValue = conditionParts[1]
 				break
 			}
 		}
@@ -231,137 +255,137 @@ func evaluateCondition(condition string, parameters map[string]string) (bool, er
 	}
 
 	// For numerical comparisons
-	actualNum, err1 := strconv.ParseFloat(actualValue, 64)
-	expectedNum, err2 := strconv.ParseFloat(expectedValue, 64)
+	actualNumber, actualNumberErr := strconv.ParseFloat(actualValue, 64)
+	expectedNumber, expectedNumberErr := strconv.ParseFloat(expectedValue, 64)
 
-	if err1 != nil || err2 != nil {
+	if actualNumberErr != nil || expectedNumberErr != nil {
 		return false, nil // One of the values is not a number, so comparison is false
 	}
 
 	switch operator {
 	case ">":
-		return actualNum > expectedNum, nil
+		return actualNumber > expectedNumber, nil
 	case ">=":
-		return actualNum >= expectedNum, nil
+		return actualNumber >= expectedNumber, nil
 	case "<":
-		return actualNum < expectedNum, nil
+		return actualNumber < expectedNumber, nil
 	case "<=":
-		return actualNum <= expectedNum, nil
+		return actualNumber <= expectedNumber, nil
 	}
 
 	return false, fmt.Errorf("unhandled operator: %s", operator)
 }
 
-// handleConditionalCommand updates ifStk and skip for an if, else, or endif command and returns validation errors.
-func handleConditionalCommand(command, args string, parameters map[string]string, ifStk *ifStack, skip *bool) error {
+// handleConditionalCommand updates conditionalStack and shouldSkip for an if, else, or endif command and returns validation errors.
+func handleConditionalCommand(command, arguments string, parameters map[string]string, conditionalStack *conditionalStack, shouldSkip *bool) error {
 	switch command {
 	case "if":
-		if strings.TrimSpace(args) == "" {
+		if strings.TrimSpace(arguments) == "" {
 			return fmt.Errorf("invalid if command format: missing condition")
 		}
-		if *skip { // If already skipping, push false to stack and continue skipping
-			ifStk.push(false)
+		if *shouldSkip { // If already skipping, push false to stack and continue skipping
+			conditionalStack.push(false)
 			return nil
 		}
-		conditionTrue, err := evaluateCondition(args, parameters)
+		conditionTrue, err := evaluateCondition(arguments, parameters)
 		if err != nil {
 			return err
 		}
-		ifStk.push(conditionTrue)
-		*skip = !conditionTrue
+		conditionalStack.push(conditionTrue)
+		*shouldSkip = !conditionTrue
 		return nil
 	case "else":
-		if strings.TrimSpace(args) != "" {
+		if strings.TrimSpace(arguments) != "" {
 			return fmt.Errorf("invalid else command format: unexpected arguments")
 		}
-		if len(*ifStk) == 0 {
+		if len(*conditionalStack) == 0 {
 			return fmt.Errorf("else without a preceding if")
 		}
-		prevIfFrame, err := ifStk.peek()
+		previousConditionalFrame, err := conditionalStack.peek()
 		if err != nil {
 			return err
 		}
-		if prevIfFrame.elseSeen {
+		if previousConditionalFrame.elseSeen {
 			return fmt.Errorf("duplicate else for if block")
 		}
-		_, err = ifStk.pop()
+		_, err = conditionalStack.pop()
 		if err != nil {
 			return err
 		}
-		prevIfState := prevIfFrame.active
+		previousIfState := previousConditionalFrame.active
 		// If the previous 'if' was true, then the 'else' block should be skipped.
 		// If the previous 'if' was false, the 'else' block should be executed,
 		// but only if we are not already skipping due to an outer 'if'.
-		if prevIfState { // Previous 'if' was true, so skip this 'else' block
-			*skip = true
+		if previousIfState { // Previous 'if' was true, so skip this 'else' block
+			*shouldSkip = true
 		} else { // Previous 'if' was false, so execute this 'else' block
 			// Only set skip to false if no outer 'if' is currently skipping
-			if len(*ifStk) > 0 {
-				outerIfFrame, err := ifStk.peek()
+			if len(*conditionalStack) > 0 {
+				outerConditionalFrame, err := conditionalStack.peek()
 				if err != nil {
 					return err
 				}
-				*skip = !outerIfFrame.active // Revert to outer if's skip state
+				*shouldSkip = !outerConditionalFrame.active // Revert to outer if's skip state
 			} else {
-				*skip = false // No outer if, so execute
+				*shouldSkip = false // No outer if, so execute
 			}
 		}
-		prevIfFrame.active = !prevIfState
-		prevIfFrame.elseSeen = true
-		*ifStk = append(*ifStk, prevIfFrame)
+		previousConditionalFrame.active = !previousIfState
+		previousConditionalFrame.elseSeen = true
+		*conditionalStack = append(*conditionalStack, previousConditionalFrame)
 		return nil
 	case "endif":
-		if strings.TrimSpace(args) != "" {
+		if strings.TrimSpace(arguments) != "" {
 			return fmt.Errorf("invalid endif command format: unexpected arguments")
 		}
-		if len(*ifStk) == 0 {
+		if len(*conditionalStack) == 0 {
 			return fmt.Errorf("endif without a preceding if")
 		}
-		_, err := ifStk.pop() // Pop from stack
+		_, err := conditionalStack.pop() // Pop from stack
 		if err != nil {
 			return err
 		}
-		if len(*ifStk) > 0 {
-			currentIfFrame, err := ifStk.peek()
+		if len(*conditionalStack) > 0 {
+			currentConditionalFrame, err := conditionalStack.peek()
 			if err != nil {
 				return err
 			}
-			*skip = !currentIfFrame.active // Revert to parent if's skip state
+			*shouldSkip = !currentConditionalFrame.active // Revert to parent if's skip state
 		} else {
-			*skip = false // No more if blocks, so no skipping
+			*shouldSkip = false // No more if blocks, so no skipping
 		}
 		return nil
 	}
 	return nil
 }
 
-// handleOutputCommand substitutes and resolves args into outputFile; callers must validate nonempty args.
-func handleOutputCommand(args string, outputFile *string, baseDir string, parameters map[string]string) {
-	if strings.TrimSpace(args) == "" {
+// handleOutputCommand substitutes and resolves arguments into outputFile; callers must validate nonempty arguments.
+func handleOutputCommand(arguments string, outputFile *string, baseDir string, parameters map[string]string) {
+	if strings.TrimSpace(arguments) == "" {
 		panic("handleOutputCommand called with empty args")
 	}
-	resolvedPath := substituteParams(args, parameters)
+	resolvedPath := substituteParams(arguments, parameters)
 	if !filepath.IsAbs(resolvedPath) {
 		resolvedPath = filepath.Join(baseDir, resolvedPath)
 	}
 	*outputFile = resolvedPath
 }
 
-// handleConcatCommand appends a parameter-substituted file item to itemsToConcat; callers must validate nonempty args.
-func handleConcatCommand(args string, itemsToConcat *[]ConcatItem, baseDir string, parameters map[string]string) {
-	if strings.TrimSpace(args) == "" {
+// handleConcatCommand appends a parameter-substituted file item to itemsToConcat; callers must validate nonempty arguments.
+func handleConcatCommand(arguments string, itemsToConcat *[]ConcatItem, baseDir string, parameters map[string]string) {
+	if strings.TrimSpace(arguments) == "" {
 		panic("handleConcatCommand called with empty args")
 	}
-	resolvedValue := substituteParams(args, parameters)
-	*itemsToConcat = append(*itemsToConcat, ConcatItem{IsFile: true, Value: resolvedValue, BaseDir: baseDir})
+	resolvedFilePath := substituteParams(arguments, parameters)
+	*itemsToConcat = append(*itemsToConcat, ConcatItem{IsFile: true, ContentOrPath: resolvedFilePath, BaseDir: baseDir})
 }
 
 // handleIncludeCommand resolves and processes an included DSL file, updating shared output, items, parameters, and include state.
-func handleIncludeCommand(args string, currentInstructionsFile string, outputFile *string, itemsToConcat *[]ConcatItem, parameters map[string]string, baseDir string, activeIncludes map[string]bool) error {
-	if strings.TrimSpace(args) == "" {
+func handleIncludeCommand(arguments string, currentInstructionsFile string, outputFile *string, itemsToConcat *[]ConcatItem, parameters map[string]string, baseDir string, activeIncludes map[string]bool) error {
+	if strings.TrimSpace(arguments) == "" {
 		return fmt.Errorf("invalid include command format: missing filename")
 	}
-	includePath := substituteParams(args, parameters)
+	includePath := substituteParams(arguments, parameters)
 	if !filepath.IsAbs(includePath) {
 		absPath, err := filepath.Abs(filepath.Join(filepath.Dir(currentInstructionsFile), includePath))
 		if err != nil {
@@ -377,9 +401,9 @@ func handleIncludeCommand(args string, currentInstructionsFile string, outputFil
 }
 
 // handleParamCommand defines a DSL parameter unless a CLI parameter or DSL set command has higher precedence.
-func handleParamCommand(args string, parameters map[string]string) error {
-	paramParts := strings.SplitN(args, "=", 2)
-	if len(paramParts) == 2 {
+func handleParamCommand(arguments string, parameters map[string]string) error {
+	paramParts := strings.SplitN(arguments, "=", 2)
+	if len(paramParts) == 2 && strings.TrimSpace(paramParts[0]) != "" {
 		paramName := paramParts[0]
 		paramValue := paramParts[1] // This is the value that needs substitution
 
@@ -387,19 +411,19 @@ func handleParamCommand(args string, parameters map[string]string) error {
 		substitutedValue := substituteParams(paramValue, parameters)
 
 		// Preserve only higher-precedence values; parameter-file values are defaults that param may replace.
-		if !cliParamsSet[paramName] && !dslSetParams[paramName] {
+		if !commandLineParameterNames[paramName] && !dslSetParameterNames[paramName] {
 			parameters[paramName] = substitutedValue
 		}
 	} else {
-		return fmt.Errorf("invalid param command format: %s", args)
+		return fmt.Errorf("invalid param command format: %s", arguments)
 	}
 	return nil
 }
 
 // handleSetCommand assigns a DSL parameter unless it originated from the CLI, returning invalid-assignment errors.
-func handleSetCommand(args string, parameters map[string]string) error {
-	setParts := strings.SplitN(args, "=", 2)
-	if len(setParts) == 2 {
+func handleSetCommand(arguments string, parameters map[string]string) error {
+	setParts := strings.SplitN(arguments, "=", 2)
+	if len(setParts) == 2 && strings.TrimSpace(setParts[0]) != "" {
 		paramName := setParts[0]
 		paramValue := setParts[1] // This is the value that needs substitution
 
@@ -407,110 +431,120 @@ func handleSetCommand(args string, parameters map[string]string) error {
 		substitutedValue := substituteParams(paramValue, parameters)
 
 		// Only set the parameter if it was NOT set by a CLI --param flag
-		if _, isCliParam := cliParamsSet[paramName]; !isCliParam {
+		if _, isCommandLineParameter := commandLineParameterNames[paramName]; !isCommandLineParameter {
 			parameters[paramName] = substitutedValue
-			dslSetParams[paramName] = true
+			dslSetParameterNames[paramName] = true
 		}
 	} else {
-		return fmt.Errorf("invalid set command format: %s", args)
+		return fmt.Errorf("invalid set command format: %s", arguments)
 	}
 	return nil
 }
 
 // handlePrintCommand appends a parameter value as text or returns an error when the parameter is missing or invalid.
-func handlePrintCommand(args string, itemsToConcat *[]ConcatItem, parameters map[string]string) error {
-	if strings.TrimSpace(args) == "" {
+func handlePrintCommand(arguments string, itemsToConcat *[]ConcatItem, parameters map[string]string) error {
+	if strings.TrimSpace(arguments) == "" {
 		return fmt.Errorf("invalid print command format: missing parameter name")
 	}
-	value, exists := parameters[args]
+	value, exists := parameters[arguments]
 	if !exists {
-		return fmt.Errorf("parameter not found: %s", args)
+		return fmt.Errorf("parameter not found: %s", arguments)
 	}
-	*itemsToConcat = append(*itemsToConcat, ConcatItem{IsFile: false, Value: value})
+	*itemsToConcat = append(*itemsToConcat, ConcatItem{IsFile: false, ContentOrPath: value})
 	return nil
 }
 
 // handleEmitCommand appends parameter-substituted literal text to itemsToConcat without returning a value.
-func handleEmitCommand(args string, itemsToConcat *[]ConcatItem, parameters map[string]string) {
-	*itemsToConcat = append(*itemsToConcat, ConcatItem{IsFile: false, Value: substituteParams(args, parameters)})
+func handleEmitCommand(arguments string, itemsToConcat *[]ConcatItem, parameters map[string]string) {
+	*itemsToConcat = append(*itemsToConcat, ConcatItem{IsFile: false, ContentOrPath: substituteParams(arguments, parameters)})
 }
 
 // dispatchCommand executes one normalized DSL line and reports whether it begins a text block or returns an error.
-func dispatchCommand(line string, instructionsFile string, outputFile *string, itemsToConcat *[]ConcatItem, parameters map[string]string, baseDir string, currentPrefix *string, ifStk *ifStack, skip *bool, activeIncludes map[string]bool) (bool, error) {
-	textBegan := false // Tracks whether this command begins a text block.
-	if *currentPrefix != "" {
+func dispatchCommand(line string, instructionsFile string, outputFile *string, itemsToConcat *[]ConcatItem, parameters map[string]string, baseDir string, currentPrefix *string, conditionalStack *conditionalStack, shouldSkip *bool, activeIncludes map[string]bool) (bool, error) {
+	beginsTextBlock := false // Tracks whether this command begins a text block.
+	prefixIsActive := *currentPrefix != ""
+	if prefixIsActive {
 		prefixWithColon := *currentPrefix + ":"
 		if strings.HasPrefix(line, prefixWithColon) {
-			if line == prefixWithColon+"clear-prefix" {
-				*currentPrefix = ""
-				return textBegan, nil
-			}
 			line = strings.TrimPrefix(line, prefixWithColon)
 		} else {
-			// If prefix is set, ignore all commands that don't have it
-			return textBegan, nil
+			// If prefix is set, ignore all commands that don't have it.
+			return beginsTextBlock, nil
 		}
 	}
 
-	parts := strings.SplitN(line, " ", 2)
-	command := parts[0]
-	var args string
-	if len(parts) > 1 {
-		args = parts[1]
+	commandParts := strings.SplitN(line, " ", 2)
+	command := commandParts[0]
+	var arguments string
+	if len(commandParts) > 1 {
+		arguments = commandParts[1]
 	}
 
 	switch command {
 	case "if", "else", "endif":
-		return textBegan, handleConditionalCommand(command, args, parameters, ifStk, skip)
+		return beginsTextBlock, handleConditionalCommand(command, arguments, parameters, conditionalStack, shouldSkip)
+	}
+
+	if *shouldSkip {
+		return beginsTextBlock, nil
 	}
 
 	if command == "set-prefix" {
-		if strings.TrimSpace(args) == "" {
-			return textBegan, fmt.Errorf("invalid set-prefix command format: missing prefix")
+		if strings.TrimSpace(arguments) == "" {
+			return beginsTextBlock, fmt.Errorf("invalid set-prefix command format: missing prefix")
 		}
-		*currentPrefix = args
-		return textBegan, nil
+		*currentPrefix = arguments
+		return beginsTextBlock, nil
 	}
 
-	if *skip {
-		return textBegan, nil
+	if command == "clear-prefix" {
+		if !prefixIsActive || strings.TrimSpace(arguments) != "" {
+			return beginsTextBlock, fmt.Errorf("invalid clear-prefix command format")
+		}
+		*currentPrefix = ""
+		return beginsTextBlock, nil
 	}
 
 	switch command {
 	case "output":
-		if strings.TrimSpace(args) == "" {
-			return textBegan, fmt.Errorf("invalid output command format: missing filename")
+		if strings.TrimSpace(arguments) == "" {
+			return beginsTextBlock, fmt.Errorf("invalid output command format: missing filename")
 		}
-		handleOutputCommand(args, outputFile, baseDir, parameters)
+		handleOutputCommand(arguments, outputFile, baseDir, parameters)
 	case "concat":
-		if strings.TrimSpace(args) == "" {
-			return textBegan, fmt.Errorf("invalid concat command format: missing filename")
+		if strings.TrimSpace(arguments) == "" {
+			return beginsTextBlock, fmt.Errorf("invalid concat command format: missing filename")
 		}
-		handleConcatCommand(args, itemsToConcat, baseDir, parameters)
+		handleConcatCommand(arguments, itemsToConcat, baseDir, parameters)
 	case "include":
-		return textBegan, handleIncludeCommand(args, instructionsFile, outputFile, itemsToConcat, parameters, baseDir, activeIncludes)
+		return beginsTextBlock, handleIncludeCommand(arguments, instructionsFile, outputFile, itemsToConcat, parameters, baseDir, activeIncludes)
 	case "param":
-		return textBegan, handleParamCommand(args, parameters)
+		return beginsTextBlock, handleParamCommand(arguments, parameters)
 	case "set":
-		return textBegan, handleSetCommand(args, parameters)
+		return beginsTextBlock, handleSetCommand(arguments, parameters)
 	case "print":
-		return textBegan, handlePrintCommand(args, itemsToConcat, parameters)
+		return beginsTextBlock, handlePrintCommand(arguments, itemsToConcat, parameters)
 	case "emit":
-		handleEmitCommand(args, itemsToConcat, parameters)
+		handleEmitCommand(arguments, itemsToConcat, parameters)
 	case "text-begin":
-		if strings.TrimSpace(args) != "" {
-			return textBegan, fmt.Errorf("invalid text-begin command format: unexpected arguments")
+		if strings.TrimSpace(arguments) != "" {
+			return beginsTextBlock, fmt.Errorf("invalid text-begin command format: unexpected arguments")
 		}
-		textBegan = true
+		beginsTextBlock = true
 	default:
-		return textBegan, fmt.Errorf("unknown command: %s", command)
+		return beginsTextBlock, fmt.Errorf("unknown command: %s", command)
 	}
-	return textBegan, nil
+	return beginsTextBlock, nil
 }
 
 // processInstructions parses one DSL file into output and concatenation state, rejecting recursive includes and returning syntax or I/O errors.
 func processInstructions(instructionsFile string, outputFile *string, itemsToConcat *[]ConcatItem, parameters map[string]string, baseDir string, activeIncludes map[string]bool) error {
 	resolvedInstructionsFile, err := filepath.Abs(instructionsFile)
+	if err != nil {
+		return fmt.Errorf("error resolving instructions file %s: %v", instructionsFile, err)
+	}
+	// Resolve symlinks and junctions so aliases cannot bypass active-include cycle detection.
+	resolvedInstructionsFile, err = filepath.EvalSymlinks(resolvedInstructionsFile)
 	if err != nil {
 		return fmt.Errorf("error resolving instructions file %s: %v", instructionsFile, err)
 	}
@@ -527,11 +561,13 @@ func processInstructions(instructionsFile string, outputFile *string, itemsToCon
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	// Permit generated SQL text while retaining a bounded per-line memory limit.
+	scanner.Buffer(make([]byte, 64*1024), maximumInputLineBytes)
 	inTextBlock := false
 	var textBlock strings.Builder
 
-	ifStk := ifStack{}
-	skip := false
+	conditionStack := conditionalStack{}
+	shouldSkip := false
 	var currentPrefix string
 
 	// Preserve literal text blocks while dispatching normalized command lines.
@@ -545,7 +581,7 @@ func processInstructions(instructionsFile string, outputFile *string, itemsToCon
 			}
 
 			if strings.TrimSpace(line) == textEndCommand {
-				*itemsToConcat = append(*itemsToConcat, ConcatItem{IsFile: false, Value: substituteParams(textBlock.String(), parameters)})
+				*itemsToConcat = append(*itemsToConcat, ConcatItem{IsFile: false, ContentOrPath: substituteParams(textBlock.String(), parameters)})
 				inTextBlock = false
 				textBlock.Reset()
 			} else {
@@ -559,18 +595,18 @@ func processInstructions(instructionsFile string, outputFile *string, itemsToCon
 			continue
 		}
 
-		textBegan, err := dispatchCommand(trimmedLine, resolvedInstructionsFile, outputFile, itemsToConcat, parameters, baseDir, &currentPrefix, &ifStk, &skip, activeIncludes)
+		beginsTextBlock, err := dispatchCommand(trimmedLine, resolvedInstructionsFile, outputFile, itemsToConcat, parameters, baseDir, &currentPrefix, &conditionStack, &shouldSkip, activeIncludes)
 		if err != nil {
 			return err
 		}
-		inTextBlock = textBegan
+		inTextBlock = beginsTextBlock
 	}
 
 	if inTextBlock {
 		return fmt.Errorf("unclosed text block")
 	}
 
-	if len(ifStk) > 0 {
+	if len(conditionStack) > 0 {
 		return fmt.Errorf("unclosed if block(s)")
 	}
 
@@ -580,27 +616,31 @@ func processInstructions(instructionsFile string, outputFile *string, itemsToCon
 // runConcat writes each planned file or text item to outputWriter and returns any read, copy, or write error.
 func runConcat(outputWriter io.Writer, itemsToConcat []ConcatItem, parameters map[string]string) error {
 	// Resolve and write each planned item in DSL order.
-	for _, item := range itemsToConcat {
-		if item.IsFile {
+	for _, concatItem := range itemsToConcat {
+		if concatItem.IsFile {
 			// Keep concatenated filenames literal; @@ escapes apply only to generated text.
-			resolvedPath := item.Value
+			resolvedPath := concatItem.ContentOrPath
 			if !filepath.IsAbs(resolvedPath) {
-				resolvedPath = filepath.Join(item.BaseDir, resolvedPath)
+				resolvedPath = filepath.Join(concatItem.BaseDir, resolvedPath)
 			}
 
 			sourceFile, err := os.Open(resolvedPath)
 			if err != nil {
 				return fmt.Errorf("error opening file %s: %v", resolvedPath, err)
 			}
-			defer sourceFile.Close()
 
-			_, err = io.Copy(outputWriter, sourceFile)
-			if err != nil {
-				return fmt.Errorf("error copying from %s: %v", resolvedPath, err)
+			// Close each source before advancing so large concatenations do not retain file handles.
+			_, copyErr := io.Copy(outputWriter, sourceFile)
+			closeErr := sourceFile.Close()
+			if copyErr != nil {
+				return fmt.Errorf("error copying from %s: %v", resolvedPath, copyErr)
+			}
+			if closeErr != nil {
+				return fmt.Errorf("error closing source file %s: %v", resolvedPath, closeErr)
 			}
 		} else {
 			// Decode text escapes only when writing generated output.
-			valueToWrite := unescapeString(item.Value)
+			valueToWrite := unescapeString(concatItem.ContentOrPath)
 			_, err := outputWriter.Write([]byte(valueToWrite))
 			if err != nil {
 				return fmt.Errorf("error writing text to output: %v", err)
@@ -608,9 +648,5 @@ func runConcat(outputWriter io.Writer, itemsToConcat []ConcatItem, parameters ma
 		}
 	}
 
-	// No success message for stdout to avoid polluting output
-	if outputWriter != os.Stdout {
-		fmt.Fprintf(os.Stdout, "Successfully concatenated files to output.\n")
-	}
 	return nil
 }

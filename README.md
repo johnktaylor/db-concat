@@ -23,7 +23,7 @@ To run the script, you need to create an instruction file (e.g., `instructions.d
 **Options:**
 
 *   `--param-file <filename>`: Comma-separated list of parameter files (key=value per line). Parameters loaded from these files have the lowest precedence.
-*   `--param <key>=<value>`: Key-value pair parameter. Can be specified multiple times. These parameters have the highest precedence, overriding both parameter files and DSL `param` commands.
+*   `--param <key>=<value>`: Key-value pair parameter with a non-empty key. Can be specified multiple times. Invalid values fail fast. These parameters have the highest precedence, overriding both parameter files and DSL `param` commands.
 *   `--output <filename>`: Specifies the output file path. If not specified, output goes to `stdout`. This overrides the `output` DSL command.
 
 ## DSL Commands

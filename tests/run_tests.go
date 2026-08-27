@@ -9,17 +9,19 @@ import (
 	"runtime"
 )
 
-type testCase struct {
-	name          string
-	instructions  string
-	output        string
-	resultFile    string
-	expected      string
-	args          []string
-	shouldFail    bool
-	stdoutFile    string
-	stderrFile    string
-	expectedError string
+type integrationTestCase struct {
+	name            string
+	instructions    string
+	output          string
+	resultFile      string
+	expected        string
+	expectedText    string
+	args            []string
+	shouldFail      bool
+	stdoutFile      string
+	stderrFile      string
+	expectedError   string
+	preservedOutput string
 }
 
 // main builds the executable, runs all integration cases, reports their results, and exits nonzero when any fail.
@@ -35,14 +37,14 @@ func main() {
 
 	fmt.Println("Building db-concat...")
 	// Build the executable under test before launching isolated integration cases.
-	buildCmd := exec.Command("go", "build", "-o", executablePath, ".")
-	buildOutput, err := buildCmd.CombinedOutput()
+	buildCommand := exec.Command("go", "build", "-o", executablePath, ".")
+	buildOutput, err := buildCommand.CombinedOutput()
 	if err != nil {
 		fmt.Printf("Build failed: %s\n%s", err, string(buildOutput))
 		os.Exit(1)
 	}
 
-	tests := []testCase{
+	tests := []integrationTestCase{
 		{
 			name:         "Parameter Files (--param-file)",
 			instructions: "tests/instructions_param_file.dsl",
@@ -54,7 +56,7 @@ func main() {
 			name:         "DSL param overrides Parameter File",
 			instructions: "tests/instructions_param_overrides_file.dsl",
 			output:       "tests/output_param_overrides_file.sql",
-			expected:     "tests/expected_output_param_overrides_file.sql",
+			expectedText: "dsl",
 			args:         []string{"--param-file", "tests/params_param_override.txt"},
 		},
 		{
@@ -63,6 +65,32 @@ func main() {
 			output:       "tests/output_cli_param.sql",
 			expected:     "tests/expected_output_cli_param.sql",
 			args:         []string{"--param", "CLI_VAR=1"},
+		},
+		{
+			name:          "Invalid command-line parameter",
+			instructions:  "tests/instructions_output.dsl",
+			shouldFail:    true,
+			expectedError: "Invalid --param value",
+			args:          []string{"--param", "INVALID"},
+		},
+		{
+			name:          "Invalid empty DSL param key",
+			instructions:  "tests/instructions_invalid_param_empty_key.dsl",
+			shouldFail:    true,
+			expectedError: "invalid param command format",
+		},
+		{
+			name:          "Invalid empty DSL set key",
+			instructions:  "tests/instructions_invalid_set_empty_key.dsl",
+			shouldFail:    true,
+			expectedError: "invalid set command format",
+		},
+		{
+			name:          "Invalid empty parameter-file key",
+			instructions:  "tests/instructions_output.dsl",
+			args:          []string{"--param-file", "tests/params_invalid_empty_key.txt"},
+			shouldFail:    true,
+			expectedError: "invalid parameter file line format",
 		},
 		{
 			name:         "DSL param command",
@@ -122,6 +150,14 @@ func main() {
 			shouldFail:    true,
 			stderrFile:    "tests/error_unclosed_if.txt",
 			expectedError: "unclosed if block(s)",
+		},
+		{
+			name:            "Failed concatenation preserves existing output",
+			instructions:    "tests/instructions_output_failure.dsl",
+			output:          "tests/output_preserve_on_error.sql",
+			shouldFail:      true,
+			expectedError:   "error opening file",
+			preservedOutput: "tests/expected_preserved_output.sql",
 		},
 		{
 			name:          "Unclosed text block",
@@ -187,6 +223,12 @@ func main() {
 			instructions: "tests/instructions_numerical_if.dsl",
 			output:       "tests/output_numerical_if.sql",
 			expected:     "tests/expected_output_numerical_if.sql",
+		},
+		{
+			name:         "Inactive branch does not change prefix",
+			instructions: "tests/instructions_inactive_prefix.dsl",
+			output:       "tests/output_inactive_prefix.sql",
+			expectedText: "SELECT 1;",
 		},
 		{
 			name:         "Processing-time substitution",
@@ -308,59 +350,74 @@ func main() {
 
 	failedTests := 0
 	// Run each case with separately captured output so failures identify the affected scenario.
-	for _, tc := range tests {
-		fmt.Printf("\n--- Test: %s ---\n", tc.name)
+	for _, testCase := range tests {
+		fmt.Printf("\n--- Test: %s ---\n", testCase.name)
 
-		var cmdArgs []string
-		if len(tc.args) > 0 {
-			cmdArgs = append(cmdArgs, tc.args...)
+		var commandArguments []string
+		if len(testCase.args) > 0 {
+			commandArguments = append(commandArguments, testCase.args...)
 		}
-		if tc.output != "" && tc.stdoutFile == "" {
-			cmdArgs = append(cmdArgs, "--output", tc.output)
+		if testCase.output != "" && testCase.stdoutFile == "" {
+			commandArguments = append(commandArguments, "--output", testCase.output)
 		}
-		cmdArgs = append(cmdArgs, tc.instructions)
+		commandArguments = append(commandArguments, testCase.instructions)
 
-		cmd := exec.Command(executablePath, cmdArgs...)
+		// Seed a destination file when a failure case must prove it remains unchanged.
+		if testCase.preservedOutput != "" {
+			preservedOutputContent, err := os.ReadFile(testCase.preservedOutput)
+			if err != nil {
+				fmt.Printf("Failed to read preserved output fixture: %s\n", err)
+				failedTests++
+				continue
+			}
+			if err := os.WriteFile(testCase.output, preservedOutputContent, 0644); err != nil {
+				fmt.Printf("Failed to seed output file: %s\n", err)
+				failedTests++
+				continue
+			}
+		}
+
+		testCommand := exec.Command(executablePath, commandArguments...)
 
 		var stdout, stderr bytes.Buffer
-		if tc.stdoutFile != "" {
-			outfile, err := os.Create(tc.stdoutFile)
+		if testCase.stdoutFile != "" {
+			stdoutCaptureFile, err := os.Create(testCase.stdoutFile)
 			if err != nil {
 				fmt.Printf("Failed to create stdout file: %s\n", err)
 				failedTests++
 				continue
 			}
-			defer outfile.Close()
-			cmd.Stdout = outfile
+			defer stdoutCaptureFile.Close()
+			testCommand.Stdout = stdoutCaptureFile
 		} else {
-			cmd.Stdout = &stdout
+			testCommand.Stdout = &stdout
 		}
 
-		if tc.stderrFile != "" {
-			errfile, err := os.Create(tc.stderrFile)
+		if testCase.stderrFile != "" {
+			stderrCaptureFile, err := os.Create(testCase.stderrFile)
 			if err != nil {
 				fmt.Printf("Failed to create stderr file: %s\n", err)
 				failedTests++
 				continue
 			}
-			defer errfile.Close()
-			cmd.Stderr = errfile
+			defer stderrCaptureFile.Close()
+			testCommand.Stderr = stderrCaptureFile
 		} else {
-			cmd.Stderr = &stderr
+			testCommand.Stderr = &stderr
 		}
 
-		err := cmd.Run()
+		err := testCommand.Run()
 
-		if tc.shouldFail {
+		if testCase.shouldFail {
 			if err == nil {
 				fmt.Println("Test FAILED: Expected error, but got none.")
 				failedTests++
 			} else {
-				if tc.expectedError != "" {
+				if testCase.expectedError != "" {
 					var errorOutput []byte
 					var readErr error
-					if tc.stderrFile != "" {
-						errorOutput, readErr = os.ReadFile(tc.stderrFile)
+					if testCase.stderrFile != "" {
+						errorOutput, readErr = os.ReadFile(testCase.stderrFile)
 					} else {
 						errorOutput = stderr.Bytes()
 					}
@@ -368,8 +425,8 @@ func main() {
 					if readErr != nil {
 						fmt.Printf("Test FAILED: could not read stderr: %v\n", readErr)
 						failedTests++
-					} else if !bytes.Contains(errorOutput, []byte(tc.expectedError)) {
-						fmt.Printf("Test FAILED: Expected error message '%s' not found in stderr.\n", tc.expectedError)
+					} else if !bytes.Contains(errorOutput, []byte(testCase.expectedError)) {
+						fmt.Printf("Test FAILED: Expected error message '%s' not found in stderr.\n", testCase.expectedError)
 						failedTests++
 					} else {
 						fmt.Println("Test PASSED. (Expected error occurred)")
@@ -378,22 +435,36 @@ func main() {
 					fmt.Println("Test PASSED. (Expected error occurred)")
 				}
 			}
+			if testCase.preservedOutput != "" {
+				if err := compareFiles(testCase.output, testCase.preservedOutput); err != nil {
+					fmt.Printf("Test FAILED: existing output was changed: %s\n", err)
+					failedTests++
+				} else {
+					fmt.Println("Test PASSED. (Existing output preserved)")
+				}
+			}
 		} else {
 			if err != nil {
 				fmt.Printf("Test FAILED: %s\n%s\n", err, stderr.String())
 				failedTests++
 			} else {
 				var outputFilePath string
-				if tc.stdoutFile != "" {
-					outputFilePath = tc.stdoutFile
-				} else if tc.resultFile != "" {
-					outputFilePath = tc.resultFile
+				if testCase.stdoutFile != "" {
+					outputFilePath = testCase.stdoutFile
+				} else if testCase.resultFile != "" {
+					outputFilePath = testCase.resultFile
 				} else {
-					outputFilePath = tc.output
+					outputFilePath = testCase.output
 				}
 
-				if err := compareFiles(outputFilePath, tc.expected); err != nil {
-					fmt.Printf("Test FAILED: %s\n", err)
+				var comparisonError error
+				if testCase.expectedText != "" {
+					comparisonError = compareFileToText(outputFilePath, testCase.expectedText)
+				} else {
+					comparisonError = compareFiles(outputFilePath, testCase.expected)
+				}
+				if comparisonError != nil {
+					fmt.Printf("Test FAILED: %s\n", comparisonError)
 					failedTests++
 				} else {
 					fmt.Println("Test PASSED.")
@@ -413,6 +484,18 @@ func main() {
 	if failedTests > 0 {
 		os.Exit(1)
 	}
+}
+
+// compareFileToText compares a file with exact expected text and returns an I/O or mismatch error.
+func compareFileToText(filename, expectedText string) error {
+	actualContent, err := os.ReadFile(filename)
+	if err != nil {
+		return fmt.Errorf("error reading file %s: %v", filename, err)
+	}
+	if !bytes.Equal(actualContent, []byte(expectedText)) {
+		return fmt.Errorf("output mismatch for %s", filename)
+	}
+	return nil
 }
 
 // compareFiles compares two files after normalizing carriage returns and returns an I/O or mismatch error.
