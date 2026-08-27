@@ -1,320 +1,69 @@
 # Test Plan for db-concat
 
-This document outlines the automated test suite for the `db-concat` tool, detailing the purpose, input, execution, and expected output for each test case.
+This plan documents the automated integration cases in `tests/run_tests.go`. Each case builds `db-concat`, invokes it with the listed fixture category, and checks the stated result. File-content assertions compare the generated result with the corresponding `expected_*` fixture unless noted otherwise.
 
-## How to Run Tests
+## Running the Suite
 
-To execute the test suite, navigate to the project's root directory and run:
+Run the suite from the project root:
 
 ```bash
 go run tests/run_tests.go
 ```
 
+The runner writes its normal fixture outputs, captures stdout or stderr where required, checks expected failures, and removes only its explicitly listed transient artifacts.
+
 ## Test Cases
 
-### Test 1: Parameter Files (`--param-file`)
+| # | Case | Fixtures and invocation | Expected result |
+| --- | --- | --- | --- |
+| 1 | Parameter files | `instructions_param_file.dsl` with `--param-file params.txt` | File parameters substitute into command arguments. |
+| 2 | DSL `param` overrides parameter file | `instructions_param_overrides_file.dsl` with `--param-file params_param_override.txt` | The DSL value is emitted. |
+| 3 | Command-line parameters | `instructions_cli_param.dsl` with `--param CLI_VAR=1` | CLI parameter substitutes into the concat path. |
+| 4 | Invalid command-line parameter | `--param INVALID` | Fails with `Invalid --param value`. |
+| 5 | Whitespace-only command-line parameter key | `--param "   =value"` | Fails with `Invalid --param value`. |
+| 6 | Non-recursive substitution | `instructions_non_recursive_substitution.dsl` with `FIRST=${SECOND}` and `SECOND=expanded` | Outputs the literal `${SECOND}` introduced by `FIRST`. |
+| 7 | Empty DSL `param` key | `instructions_invalid_param_empty_key.dsl` | Fails with `invalid param command format`. |
+| 8 | Empty DSL `set` key | `instructions_invalid_set_empty_key.dsl` | Fails with `invalid set command format`. |
+| 9 | Empty parameter-file key | `--param-file params_invalid_empty_key.txt` | Fails with `invalid parameter file line format`. |
+| 10 | DSL `param` command | `instructions_dsl_param.dsl` | A DSL parameter substitutes into a concat path. |
+| 11 | Parameter precedence: CLI > DSL > file | `instructions_precedence.dsl`, `params_precedence.txt`, and CLI override | The CLI value is used. |
+| 12 | True `if` condition | `instructions_if_true.dsl` | Only the true branch is concatenated. |
+| 13 | False `if` condition | `instructions_if_false.dsl` | Only the `else` branch is concatenated. |
+| 14 | `print` command | `instructions_print.dsl` | The current parameter value is written to output. |
+| 15 | stdout output | `instructions_output.dsl` without `--output` | stdout matches `expected_output_stdout.txt`. |
+| 16 | `--output` file output | `instructions_output.dsl` with `--output` | Output file matches the expected content and uses mode `0644` on Unix. |
+| 17 | CLI output precedence | `instructions_output_precedence.dsl` with `--output` | CLI destination is used instead of the DSL `output` destination. |
+| 18 | Unclosed `if` block | `instructions_unclosed_if.dsl` | Fails with `unclosed if block(s)`. |
+| 19 | Failure preserves existing output | `instructions_output_failure.dsl` with a seeded destination | Fails to open input and leaves the destination unchanged. |
+| 20 | Unclosed text block | `instructions_unclosed_text_block.dsl` | Fails with `unclosed text block`. |
+| 21 | Unknown command | `instructions_unknown_command.dsl` | Fails with `unknown command`. |
+| 22 | `set` command | `instructions_set.dsl` | Assigns and prints parameter values. |
+| 23 | Precedence: `set` > `param` | `instructions_set_vs_param.dsl` | `set` value wins over DSL `param`. |
+| 24 | Precedence: CLI > `set` | `instructions_cli_vs_set.dsl` with CLI parameter | CLI value wins over `set`. |
+| 25 | `emit` command | `instructions_emit.dsl` | Emits text and decodes supported `@@` escapes. |
+| 26 | Literal `@@` in concat path | `instructions_concat_literal_atat.dsl` | Opens the literal filename `source@@n.sql`; path escapes are not decoded. |
+| 27 | Prefix commands | `instructions_prefix.dsl` | Executes only matching prefixed commands until `clear-prefix`. |
+| 28 | Nested conditionals | `instructions_nested_if.dsl` | Selects the correct nested branches. |
+| 29 | Numeric conditions | `instructions_numerical_if.dsl` | Supports numeric comparisons and treats non-numeric comparisons as false. |
+| 30 | Inactive branch does not change prefix | `instructions_inactive_prefix.dsl` | Inactive commands do not affect active prefix state. |
+| 31 | Inactive text block | `instructions_inactive_text_block.dsl` | Text in an inactive branch is discarded, including control-like text. |
+| 32 | Processing-time substitution | `instructions_processing_time_substitution.dsl` | Each command uses parameter values available when it is processed. |
+| 33 | Include-path substitution | `instructions_include_substitution.dsl` | Parameters substitute in an `include` path. |
+| 34 | Missing parameter in `print` | `instructions_print_missing.dsl` | Fails with `parameter not found`. |
+| 35 | Relative DSL output path | `relative_output/instructions_relative_output.dsl` | Resolves the DSL output path relative to its instruction file. |
+| 36 | Prefixed `text-end` | `instructions_prefix_text_block.dsl` | Requires the active prefix on `text-end`. |
+| 37 | Invalid `output` syntax | `instructions_invalid_output.dsl` | Fails with `invalid output command format`. |
+| 38 | Invalid `concat` syntax | `instructions_invalid_concat.dsl` | Fails with `invalid concat command format`. |
+| 39 | Invalid `include` syntax | `instructions_invalid_include.dsl` | Fails with `invalid include command format`. |
+| 40 | Invalid `print` syntax | `instructions_invalid_print.dsl` | Fails with `invalid print command format`. |
+| 41 | Invalid `if` syntax | `instructions_invalid_if.dsl` | Fails with `invalid if command format`. |
+| 42 | Invalid `else` syntax | `instructions_invalid_else.dsl` | Fails with `invalid else command format`. |
+| 43 | Duplicate `else` | `instructions_duplicate_else.dsl` | Fails with `duplicate else for if block`. |
+| 44 | Include cycle | `instructions_include_cycle.dsl` | Fails with `include cycle detected`. |
+| 45 | Invalid `endif` syntax | `instructions_invalid_endif.dsl` | Fails with `invalid endif command format`. |
+| 46 | Invalid `text-begin` syntax | `instructions_invalid_text_begin.dsl` | Fails with `invalid text-begin command format`. |
+| 47 | Invalid `set-prefix` syntax | `instructions_invalid_set_prefix.dsl` | Fails with `invalid set-prefix command format`. |
 
-*   **Purpose:** Verifies that parameters can be loaded from an external file and used for substitution in DSL commands.
-*   **Input Files:**
-    *   `tests/params.txt`:
-        ```
-        MY_VAR=1
-        ```
-    *   `tests/instructions_param_file.dsl`:
-        ```dsl
-        param ANOTHER_VAR=2
-        concat ${MY_VAR}.sql
-        concat ${ANOTHER_VAR}.sql
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --param-file tests\params.txt --output tests\output_param_file.sql tests\instructions_param_file.dsl
-    ```
-*   **Expected Output:** `tests/output_param_file.sql` should contain `SELECT 1;SELECT 2;`
+## Coverage Maintenance
 
-### Test 2: Command-line Parameters (`--param`)
-
-*   **Purpose:** Verifies that parameters can be passed directly via command-line arguments and used for substitution.
-*   **Input Files:**
-    *   `tests/instructions_cli_param.dsl`:
-        ```dsl
-        concat ${CLI_VAR}.sql
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --param CLI_VAR=1 --output tests\output_cli_param.sql tests\instructions_cli_param.dsl
-    ```
-*   **Expected Output:** `tests/output_cli_param.sql` should contain `SELECT 1;`
-
-### Test 3: DSL `param` Command
-
-*   **Purpose:** Verifies that parameters can be defined directly within the DSL instruction file, including support for parameter substitution within the assigned value.
-*   **Input Files:**
-    *   `tests/instructions_dsl_param.dsl`:
-        ```dsl
-        param DSL_VAR=2
-        concat ${DSL_VAR}.sql
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --output tests\output_dsl_param.sql tests\instructions_dsl_param.dsl
-    ```
-*   **Expected Output:** `tests/output_dsl_param.sql` should contain `SELECT 2;`
-
-### Test 4: Parameter Precedence (CLI > DSL > File)
-
-*   **Purpose:** Verifies that command-line parameters have the highest precedence, followed by DSL-defined parameters, and then parameters from files.
-*   **Input Files:**
-    *   `tests/params_precedence.txt`:
-        ```
-        OVERRIDE_VAR=FromFile
-        ```
-    *   `tests/instructions_precedence.dsl`:
-        ```dsl
-        param OVERRIDE_VAR=FromDSL
-        concat ${OVERRIDE_VAR}.sql
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --param-file tests\params_precedence.txt --param OVERRIDE_VAR=1 --output tests\output_precedence.sql tests\instructions_precedence.dsl
-    ```
-*   **Expected Output:** `tests/output_precedence.sql` should contain `SELECT 1;`
-
-### Test 5a: `if` Condition is True
-
-*   **Purpose:** Verifies that the `if` block is executed when its condition evaluates to true.
-*   **Input Files:**
-    *   `tests/instructions_if_true.dsl`:
-        ```dsl
-        param ENV=dev
-        if ENV=dev
-            concat 1.sql
-        else
-            concat 2.sql
-        endif
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --output tests\output_if_true.sql tests\instructions_if_true.dsl
-    ```
-*   **Expected Output:** `tests/output_if_true.sql` should contain `SELECT 1;`
-
-### Test 5b: `if` Condition is False
-
-*   **Purpose:** Verifies that the `else` block is executed when the `if` condition evaluates to false.
-*   **Input Files:**
-    *   `tests/instructions_if_false.dsl`:
-        ```dsl
-        param ENV=prod
-        if ENV=dev
-            concat 1.sql
-        else
-            concat 2.sql
-        endif
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --output tests\output_if_false.sql tests\instructions_if_false.dsl
-    ```
-*   **Expected Output:** `tests/output_if_false.sql` should contain `SELECT 2;`
-
-### Test 6: `print` Command
-
-*   **Purpose:** Verifies that the `print` command outputs the value of a specified parameter to the output stream.
-*   **Input Files:**
-    *   `tests/instructions_print.dsl`:
-        ```dsl
-        param MESSAGE=HelloFromPrint
-        print MESSAGE
-        concat 1.sql
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --output tests\output_print.sql tests\instructions_print.dsl
-    ```
-*   **Expected Output:** `tests/output_print.sql` should contain `HelloFromPrintSELECT 1;`
-
-### Test 7a: Output to `stdout`
-
-*   **Purpose:** Verifies that the tool outputs to standard output when no output file is specified.
-*   **Input Files:**
-    *   `tests/instructions_output.dsl`:
-        ```dsl
-        concat 1.sql
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe tests\instructions_output.dsl
-    ```
-*   **Expected Output:** `stdout` should contain `SELECT 1;`
-
-### Test 7b: Output to File Using `--output` Flag
-
-*   **Purpose:** Verifies that the tool outputs to a specified file when the `--output` flag is used.
-*   **Input Files:**
-    *   `tests/instructions_output.dsl` (same as 7a)
-*   **Command:**
-    ```bash
-    .\db-concat.exe --output tests\output_file.sql tests\instructions_output.dsl
-    ```
-*   **Expected Output:** `tests/output_file.sql` should contain `SELECT 1;`
-
-### Test 8a: Unclosed `if` Block Error Handling
-
-*   **Purpose:** Verifies that the tool correctly reports an error for unclosed `if` blocks.
-*   **Input Files:**
-    *   `tests/instructions_unclosed_if.dsl`:
-        ```dsl
-        if ENV=dev
-            concat 1.sql
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --output tests\output_error_unclosed_if.sql tests\instructions_unclosed_if.dsl
-    ```
-*   **Expected Output:** `stderr` should contain `Error processing instructions: unclosed if block(s)` and the command should exit with a non-zero status.
-
-### Test 8b: Unknown Command Error Handling
-
-*   **Purpose:** Verifies that the tool correctly reports an error for unknown DSL commands.
-*   **Input Files:**
-    *   `tests/instructions_unknown_command.dsl`:
-        ```dsl
-        unknown_cmd arg
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --output tests\output_error_unknown_command.sql tests\instructions_unknown_command.dsl
-    ```
-*   **Expected Output:** `stderr` should contain `Error processing instructions: unknown command: unknown_cmd` and the command should exit with a non-zero status.
-
-### Test 9: `set` Command
-
-*   **Purpose:** Verifies that the `set` command correctly assigns values to parameters, including using parameter substitution.
-*   **Input Files:**
-    *   `tests/instructions_set.dsl`:
-        ```dsl
-        param INITIAL_VAR=InitialValue
-        set NEW_VAR=LiteralValue
-        set TRANSFORMED_VAR=${INITIAL_VAR}_Transformed
-        print NEW_VAR
-        print TRANSFORMED_VAR
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --output tests\output_set.sql tests\instructions_set.dsl
-    ```
-*   **Expected Output:** `tests/output_set.sql` should contain `LiteralValueInitialValue_Transformed`
-
-### Test 10: `emit` Command
-
-*   **Purpose:** Verifies that the `emit` command outputs the specified text, including parameter substitution and special character unescaping, without automatically adding a newline.
-*   **Input Files:**
-    *   `tests/instructions_emit.dsl`:
-        ```dsl
-        param MY_VAR=World
-        emit Hello, ${MY_VAR}!@@nThis is a new line.And a carriage return.@@rAnd a tab.@@t
-        emit Another line.
-        emit A line with@@sspaces.
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --output tests\output_emit.sql tests\instructions_emit.dsl
-    ```
-*   **Expected Output:** `tests/output_emit.sql` should contain `Hello, World!\nThis is a new line.And a carriage return.\rAnd a tab.\tAnother line.A line with spaces.`
-
-### Test 11: Prefix Commands (`set-prefix`, `clear-prefix`)
-
-*   **Purpose:** Verifies that `set-prefix` correctly scopes commands and `clear-prefix` removes the scope.
-*   **Input Files:**
-    *   `tests/instructions_prefix.dsl`:
-        ```dsl
-        # This should be included
-        concat ..\1.sql
-
-        set-prefix myapp
-
-        # This should be ignored
-        concat ..\2.sql
-
-        # This should be included
-        myapp:concat ..\2.sql
-
-        # This should clear the prefix
-        myapp:clear-prefix
-
-        # This should be included again
-        concat ..\1.sql
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --output tests\output_prefix.sql tests\instructions_prefix.dsl
-    ```
-*   **Expected Output:** `tests/output_prefix.sql` should contain `SELECT 1;SELECT 2;SELECT 1;`
-
-### Test 12: Nested `if` Statements
-
-*   **Purpose:** Verifies that nested `if` and `else` blocks are correctly processed.
-*   **Input Files:**
-    *   `tests/instructions_nested_if.dsl`:
-        ```dsl
-        param OUTER=true
-        param INNER=false
-
-        if OUTER=true
-            concat 1.sql
-            if INNER=true
-                concat 2.sql
-            else
-                concat 3.sql
-            endif
-            concat 4.sql
-        else
-            concat 5.sql
-        endif
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --output tests\output_nested_if.sql tests\instructions_nested_if.dsl
-    ```
-*   **Expected Output:** `tests/output_nested_if.sql` should contain `SELECT 1;SELECT 3;SELECT 4;`
-
-### Test 13: Numerical `if` Conditions
-
-*   **Purpose:** Verifies that numerical comparison operators (`>`, `>=`, `<`, `<=`) work correctly in `if` conditions.
-*   **Input Files:**
-    *   `tests/instructions_numerical_if.dsl`:
-        ```dsl
-        param VERSION=3.5
-        param COUNT=10
-
-        # Test > (true)
-        if VERSION>3.0
-            emit GT_TRUE
-        endif
-
-        # Test < (false)
-        if VERSION<3.0
-            emit LT_FALSE
-        endif
-
-        # Test >= (true)
-        if COUNT>=10
-            emit GTE_TRUE
-        endif
-
-        # Test <= (false)
-        if COUNT<=9
-            emit LTE_FALSE
-        endif
-
-        # Test with non-numeric (false)
-        if VERSION>abc
-            emit NON_NUMERIC
-        endif
-        ```
-*   **Command:**
-    ```bash
-    .\db-concat.exe --output tests\output_numerical_if.sql tests\instructions_numerical_if.dsl
-    ```
-*   **Expected Output:** `tests/output_numerical_if.sql` should contain `GT_TRUEGTE_TRUE`
+`tests/run_tests.go` is the source of truth for executable test cases. When a case is added, removed, or changed, update this table in the same change so that the case count, scenario, and expected result remain accurate.
