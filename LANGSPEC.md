@@ -13,7 +13,7 @@ The `db-concat` tool is designed to combine multiple SQL files and inline text i
 *   **Whitespace:** Leading and trailing whitespace on a line is trimmed before parsing the command and its arguments.
 *   **Line Length:** A single instruction or text-block line may contain up to 1 MiB of UTF-8 data. Longer lines are rejected.
 *   **Case-Sensitivity:** Commands are case-sensitive (e.g., `concat` is recognized, `CONCAT` is not).
-*   **Parameter Substitution:** Parameters can be referenced within command arguments using the `${KEY}` syntax. Substitution is performed when each command is processed, using the current parameter values at that point in execution. Later updates to parameters do not retroactively affect commands that have already been processed.
+*   **Parameter Substitution:** Parameters can be referenced within command arguments using the `${KEY}` syntax. Substitution is performed once against placeholders in the original text, using the current parameter values at that point in execution. Placeholders introduced by a replacement value are not expanded recursively. Later updates to parameters do not retroactively affect commands that have already been processed.
 
 ## 3. Commands
 
@@ -55,7 +55,7 @@ The `db-concat` tool is designed to combine multiple SQL files and inline text i
 
 *   **Purpose:** Defines a block of inline text to be included directly in the output.
 *   **Arguments:** None for both commands.
-*   **Behavior:** All lines between `text-begin` and `text-end` (exclusive) will be treated as literal text and appended to the output. Each line within the block will have a newline character (\n) appended to it. Parameter substitution and `@@` escape decoding occur within `text-begin`/`text-end` blocks.
+*   **Behavior:** All lines between `text-begin` and `text-end` (exclusive) will be treated as literal text and appended to the output. Each line within the block will have a newline character (\n) appended to it. Parameter substitution and `@@` escape decoding occur within `text-begin`/`text-end` blocks. In an inactive conditional branch, the entire block is parsed structurally but its contents are discarded; command-like text inside it cannot affect conditional state.
 *   **Note:** The text block is collected literally while parsing. Parameter substitution is applied when the `text-end` command is processed and the completed block is appended to the output stream. This uses the current parameter values at that moment.
 *   **Example:**
     ```dsl
@@ -71,7 +71,7 @@ The `db-concat` tool is designed to combine multiple SQL files and inline text i
 *   **Arguments:**
     *   `<key>`: The name of the parameter.
     *   `<value>`: The value to assign to the parameter. This value *does* undergo parameter substitution at the time of definition.
-*   **Behavior:** The key must not be empty. This command overrides values loaded from `--param-file` and earlier `param` commands. It does not override a command-line `--param` value or a value established by a DSL `set` command.
+*   **Behavior:** Surrounding whitespace is removed from the key, which must contain at least one non-whitespace character. This command overrides values loaded from `--param-file` and earlier `param` commands. It does not override a command-line `--param` value or a value established by a DSL `set` command.
 *   **Example:**
     ```dsl
     param DB_VERSION=1.0.0
@@ -84,7 +84,7 @@ The `db-concat` tool is designed to combine multiple SQL files and inline text i
 *   **Arguments:**
     *   `<key>`: The name of the parameter.
     *   `<value>`: The value to assign to the parameter. This value *does* undergo parameter substitution at the time of assignment, allowing for dynamic values based on other parameters.
-*   **Behavior:** The key must not be empty. This command overrides parameters from `--param-file` and DSL `param` commands. However, it **cannot** override a parameter that has been set by a command-line `--param` flag (which has the highest precedence).
+*   **Behavior:** Surrounding whitespace is removed from the key, which must contain at least one non-whitespace character. This command overrides parameters from `--param-file` and DSL `param` commands. However, it **cannot** override a parameter that has been set by a command-line `--param` flag (which has the highest precedence).
 *   **Example:**
     ```dsl
     param SCHEMA_NAME=public
@@ -215,14 +215,14 @@ concat other_file.sql
 
 Parameters are key-value pairs that can be used to store dynamic information. The implementation applies the following assignment rules:
 
-1.  **Command-line `--param <key>=<value>` flags (Highest Precedence):** These parameters are passed directly when running `db-concat`. A parameter set via a `--param` flag cannot be overridden by any DSL command (`param` or `set`). Each value must contain `=` and a non-empty key; invalid values cause processing to fail before the DSL is read.
+1.  **Command-line `--param <key>=<value>` flags (Highest Precedence):** These parameters are passed directly when running `db-concat`. A parameter set via a `--param` flag cannot be overridden by any DSL command (`param` or `set`). Each value must contain `=` and a key with at least one non-whitespace character; surrounding key whitespace is removed, and invalid values cause processing to fail before the DSL is read.
 2.  **DSL `set <key>=<value>` commands:** These commands within the instruction file assign a new value to a parameter. They override parameters defined by `param` commands or loaded from `--param-file`. Values assigned via `set` undergo parameter substitution at the time of assignment.
 3.  **DSL `param <key>=<value>` commands:** These commands override values from parameter files and earlier `param` commands, but not a command-line `--param` value or a value established by DSL `set`. Their values undergo parameter substitution at the time of definition.
-4.  **`--param-file <filename>` (Lowest Precedence):** Parameters loaded from external files (one `key=value` pair per line, with a non-empty key) are applied before DSL processing. When multiple parameter files define the same key, the later file wins. Their values can be overridden by either DSL command. Parameter-file lines share the 1 MiB maximum line length.
+4.  **`--param-file <filename>` (Lowest Precedence):** Parameters loaded from external files (one `key=value` pair per line, with a key containing at least one non-whitespace character) are applied before DSL processing. Surrounding key whitespace is removed. When multiple parameter files define the same key, the later file wins. Their values can be overridden by either DSL command. Parameter-file lines share the 1 MiB maximum line length.
 
 **Parameter File Path Resolution:** Paths passed via `--param-file` are resolved relative to the current working directory of the `db-concat` process unless an absolute path is provided. They are not resolved relative to the instruction file.
 
-**Parameter Substitution:** When a parameter is referenced using `${KEY}` syntax (e.g., `concat ${MY_FILE}.sql`), the tool will replace `${KEY}` with the current value of `MY_FILE` from its internal parameter map at the time the relevant command is processed. This substitution occurs for arguments of `concat`, `include`, `output`, `param`, `set` (for the value being assigned), and `emit`, and within `text-begin`/`text-end` blocks when the block is closed by `text-end`. `print` takes a literal parameter name and does not perform substitution. Later parameter updates do not change the meaning of already-processed commands.
+**Parameter Substitution:** When a parameter is referenced using `${KEY}` syntax (e.g., `concat ${MY_FILE}.sql`), the tool will replace `${KEY}` with the current value of `MY_FILE` from its internal parameter map at the time the relevant command is processed. Each placeholder from the original text is considered once; replacement values are not scanned recursively for more placeholders. This substitution occurs for arguments of `concat`, `include`, `output`, `param`, `set` (for the value being assigned), and `emit`, and within `text-begin`/`text-end` blocks when the block is closed by `text-end`. `print` takes a literal parameter name and does not perform substitution. Later parameter updates do not change the meaning of already-processed commands.
 
 ## 6. Error Handling
 

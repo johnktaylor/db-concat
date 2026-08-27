@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,7 +12,18 @@ import (
 	"strings"
 )
 
-const maximumInputLineBytes = 1024 * 1024
+const (
+	maximumInputLineBytes   = 1024 * 1024
+	defaultOutputPermission = os.FileMode(0644)
+)
+
+type textBlockMode int
+
+const (
+	textBlockNone textBlockMode = iota
+	textBlockOutput
+	textBlockDiscard
+)
 
 type ConcatItem struct {
 	IsFile        bool
@@ -69,13 +81,13 @@ func main() {
 	// Load parameters from command line (highest precedence) before processing DSL instructions
 	// Apply CLI values before DSL parsing so DSL commands cannot override them.
 	for _, parameterArgument := range commandLineParameterValues {
-		parameterParts := strings.SplitN(parameterArgument, "=", 2)
-		if len(parameterParts) != 2 || parameterParts[0] == "" {
+		parameterName, parameterValue, isValid := parseParameterAssignment(parameterArgument)
+		if !isValid {
 			fmt.Fprintf(os.Stderr, "Invalid --param value %q: expected key=value with a non-empty key\n", parameterArgument)
 			os.Exit(1)
 		}
-		parameters[parameterParts[0]] = parameterParts[1]
-		commandLineParameterNames[parameterParts[0]] = true
+		parameters[parameterName] = parameterValue
+		commandLineParameterNames[parameterName] = true
 	}
 
 	var dslOutputFile string
@@ -109,6 +121,15 @@ func writeOutput(finalOutputFile string, itemsToConcat []ConcatItem, parameters 
 		return runConcat(os.Stdout, itemsToConcat, parameters)
 	}
 
+	// Preserve an existing destination's permissions, or use a predictable readable default for a new file.
+	outputPermission := defaultOutputPermission
+	existingOutputInfo, statErr := os.Stat(finalOutputFile)
+	if statErr == nil {
+		outputPermission = existingOutputInfo.Mode().Perm()
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("error inspecting output file %s: %v", finalOutputFile, statErr)
+	}
+
 	// Create the temporary file beside the destination so a successful rename stays on the same filesystem.
 	temporaryOutput, err := os.CreateTemp(filepath.Dir(finalOutputFile), "."+filepath.Base(finalOutputFile)+".tmp-*")
 	if err != nil {
@@ -119,6 +140,9 @@ func writeOutput(finalOutputFile string, itemsToConcat []ConcatItem, parameters 
 		temporaryOutput.Close()
 		os.Remove(temporaryOutputPath)
 	}()
+	if err := temporaryOutput.Chmod(outputPermission); err != nil {
+		return fmt.Errorf("error setting permissions on temporary output file %s: %v", temporaryOutputPath, err)
+	}
 
 	if err := runConcat(temporaryOutput, itemsToConcat, parameters); err != nil {
 		return err
@@ -151,14 +175,27 @@ func loadParamsFromFile(filename string, parameters map[string]string) error {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		parameterParts := strings.SplitN(line, "=", 2)
-		if len(parameterParts) == 2 && strings.TrimSpace(parameterParts[0]) != "" {
-			parameters[parameterParts[0]] = parameterParts[1]
+		parameterName, parameterValue, isValid := parseParameterAssignment(line)
+		if isValid {
+			parameters[parameterName] = parameterValue
 		} else {
 			return fmt.Errorf("invalid parameter file line format: %s", line)
 		}
 	}
 	return scanner.Err()
+}
+
+// parseParameterAssignment parses key=value text, trims the key, and reports whether the key is nonempty.
+func parseParameterAssignment(assignment string) (parameterName, parameterValue string, isValid bool) {
+	parameterParts := strings.SplitN(assignment, "=", 2)
+	if len(parameterParts) != 2 {
+		return "", "", false
+	}
+	parameterName = strings.TrimSpace(parameterParts[0])
+	if parameterName == "" {
+		return "", "", false
+	}
+	return parameterName, parameterParts[1], true
 }
 
 type stringList []string
@@ -176,12 +213,33 @@ func (values *stringList) Set(value string) error {
 
 // substituteParams replaces known ${key} references in text using parameters and returns the substituted text.
 func substituteParams(text string, parameters map[string]string) string {
-	result := text
-	// Substitute every currently defined key without recursively expanding replacement values.
-	for key, value := range parameters {
-		result = strings.ReplaceAll(result, "$"+"{"+key+"}", value)
+	var substitutedText strings.Builder
+	remainingText := text
+
+	// Consume placeholders from the original text so inserted values are never scanned recursively.
+	for {
+		placeholderStart := strings.Index(remainingText, "${")
+		if placeholderStart < 0 {
+			substitutedText.WriteString(remainingText)
+			break
+		}
+		placeholderEndOffset := strings.Index(remainingText[placeholderStart+2:], "}")
+		if placeholderEndOffset < 0 {
+			substitutedText.WriteString(remainingText)
+			break
+		}
+
+		placeholderEnd := placeholderStart + 2 + placeholderEndOffset
+		parameterName := remainingText[placeholderStart+2 : placeholderEnd]
+		substitutedText.WriteString(remainingText[:placeholderStart])
+		if parameterValue, exists := parameters[parameterName]; exists {
+			substitutedText.WriteString(parameterValue)
+		} else {
+			substitutedText.WriteString(remainingText[placeholderStart : placeholderEnd+1])
+		}
+		remainingText = remainingText[placeholderEnd+1:]
 	}
-	return result
+	return substitutedText.String()
 }
 
 // unescapeString converts DSL @@ escape sequences in text and returns the decoded text.
@@ -402,17 +460,15 @@ func handleIncludeCommand(arguments string, currentInstructionsFile string, outp
 
 // handleParamCommand defines a DSL parameter unless a CLI parameter or DSL set command has higher precedence.
 func handleParamCommand(arguments string, parameters map[string]string) error {
-	paramParts := strings.SplitN(arguments, "=", 2)
-	if len(paramParts) == 2 && strings.TrimSpace(paramParts[0]) != "" {
-		paramName := paramParts[0]
-		paramValue := paramParts[1] // This is the value that needs substitution
+	parameterName, parameterValue, isValid := parseParameterAssignment(arguments)
+	if isValid {
 
 		// Perform substitution on the value before storing it
-		substitutedValue := substituteParams(paramValue, parameters)
+		substitutedValue := substituteParams(parameterValue, parameters)
 
 		// Preserve only higher-precedence values; parameter-file values are defaults that param may replace.
-		if !commandLineParameterNames[paramName] && !dslSetParameterNames[paramName] {
-			parameters[paramName] = substitutedValue
+		if !commandLineParameterNames[parameterName] && !dslSetParameterNames[parameterName] {
+			parameters[parameterName] = substitutedValue
 		}
 	} else {
 		return fmt.Errorf("invalid param command format: %s", arguments)
@@ -422,18 +478,16 @@ func handleParamCommand(arguments string, parameters map[string]string) error {
 
 // handleSetCommand assigns a DSL parameter unless it originated from the CLI, returning invalid-assignment errors.
 func handleSetCommand(arguments string, parameters map[string]string) error {
-	setParts := strings.SplitN(arguments, "=", 2)
-	if len(setParts) == 2 && strings.TrimSpace(setParts[0]) != "" {
-		paramName := setParts[0]
-		paramValue := setParts[1] // This is the value that needs substitution
+	parameterName, parameterValue, isValid := parseParameterAssignment(arguments)
+	if isValid {
 
 		// Perform substitution on the value before storing it
-		substitutedValue := substituteParams(paramValue, parameters)
+		substitutedValue := substituteParams(parameterValue, parameters)
 
 		// Only set the parameter if it was NOT set by a CLI --param flag
-		if _, isCommandLineParameter := commandLineParameterNames[paramName]; !isCommandLineParameter {
-			parameters[paramName] = substitutedValue
-			dslSetParameterNames[paramName] = true
+		if _, isCommandLineParameter := commandLineParameterNames[parameterName]; !isCommandLineParameter {
+			parameters[parameterName] = substitutedValue
+			dslSetParameterNames[parameterName] = true
 		}
 	} else {
 		return fmt.Errorf("invalid set command format: %s", arguments)
@@ -459,9 +513,8 @@ func handleEmitCommand(arguments string, itemsToConcat *[]ConcatItem, parameters
 	*itemsToConcat = append(*itemsToConcat, ConcatItem{IsFile: false, ContentOrPath: substituteParams(arguments, parameters)})
 }
 
-// dispatchCommand executes one normalized DSL line and reports whether it begins a text block or returns an error.
-func dispatchCommand(line string, instructionsFile string, outputFile *string, itemsToConcat *[]ConcatItem, parameters map[string]string, baseDir string, currentPrefix *string, conditionalStack *conditionalStack, shouldSkip *bool, activeIncludes map[string]bool) (bool, error) {
-	beginsTextBlock := false // Tracks whether this command begins a text block.
+// dispatchCommand executes one normalized DSL line and returns its text-block mode or an error.
+func dispatchCommand(line string, instructionsFile string, outputFile *string, itemsToConcat *[]ConcatItem, parameters map[string]string, baseDir string, currentPrefix *string, conditionalStack *conditionalStack, shouldSkip *bool, activeIncludes map[string]bool) (textBlockMode, error) {
 	prefixIsActive := *currentPrefix != ""
 	if prefixIsActive {
 		prefixWithColon := *currentPrefix + ":"
@@ -469,7 +522,7 @@ func dispatchCommand(line string, instructionsFile string, outputFile *string, i
 			line = strings.TrimPrefix(line, prefixWithColon)
 		} else {
 			// If prefix is set, ignore all commands that don't have it.
-			return beginsTextBlock, nil
+			return textBlockNone, nil
 		}
 	}
 
@@ -482,59 +535,62 @@ func dispatchCommand(line string, instructionsFile string, outputFile *string, i
 
 	switch command {
 	case "if", "else", "endif":
-		return beginsTextBlock, handleConditionalCommand(command, arguments, parameters, conditionalStack, shouldSkip)
+		return textBlockNone, handleConditionalCommand(command, arguments, parameters, conditionalStack, shouldSkip)
 	}
 
 	if *shouldSkip {
-		return beginsTextBlock, nil
+		if command == "text-begin" {
+			return textBlockDiscard, nil
+		}
+		return textBlockNone, nil
 	}
 
 	if command == "set-prefix" {
 		if strings.TrimSpace(arguments) == "" {
-			return beginsTextBlock, fmt.Errorf("invalid set-prefix command format: missing prefix")
+			return textBlockNone, fmt.Errorf("invalid set-prefix command format: missing prefix")
 		}
 		*currentPrefix = arguments
-		return beginsTextBlock, nil
+		return textBlockNone, nil
 	}
 
 	if command == "clear-prefix" {
 		if !prefixIsActive || strings.TrimSpace(arguments) != "" {
-			return beginsTextBlock, fmt.Errorf("invalid clear-prefix command format")
+			return textBlockNone, fmt.Errorf("invalid clear-prefix command format")
 		}
 		*currentPrefix = ""
-		return beginsTextBlock, nil
+		return textBlockNone, nil
 	}
 
 	switch command {
 	case "output":
 		if strings.TrimSpace(arguments) == "" {
-			return beginsTextBlock, fmt.Errorf("invalid output command format: missing filename")
+			return textBlockNone, fmt.Errorf("invalid output command format: missing filename")
 		}
 		handleOutputCommand(arguments, outputFile, baseDir, parameters)
 	case "concat":
 		if strings.TrimSpace(arguments) == "" {
-			return beginsTextBlock, fmt.Errorf("invalid concat command format: missing filename")
+			return textBlockNone, fmt.Errorf("invalid concat command format: missing filename")
 		}
 		handleConcatCommand(arguments, itemsToConcat, baseDir, parameters)
 	case "include":
-		return beginsTextBlock, handleIncludeCommand(arguments, instructionsFile, outputFile, itemsToConcat, parameters, baseDir, activeIncludes)
+		return textBlockNone, handleIncludeCommand(arguments, instructionsFile, outputFile, itemsToConcat, parameters, baseDir, activeIncludes)
 	case "param":
-		return beginsTextBlock, handleParamCommand(arguments, parameters)
+		return textBlockNone, handleParamCommand(arguments, parameters)
 	case "set":
-		return beginsTextBlock, handleSetCommand(arguments, parameters)
+		return textBlockNone, handleSetCommand(arguments, parameters)
 	case "print":
-		return beginsTextBlock, handlePrintCommand(arguments, itemsToConcat, parameters)
+		return textBlockNone, handlePrintCommand(arguments, itemsToConcat, parameters)
 	case "emit":
 		handleEmitCommand(arguments, itemsToConcat, parameters)
 	case "text-begin":
 		if strings.TrimSpace(arguments) != "" {
-			return beginsTextBlock, fmt.Errorf("invalid text-begin command format: unexpected arguments")
+			return textBlockNone, fmt.Errorf("invalid text-begin command format: unexpected arguments")
 		}
-		beginsTextBlock = true
+		return textBlockOutput, nil
 	default:
-		return beginsTextBlock, fmt.Errorf("unknown command: %s", command)
+		return textBlockNone, fmt.Errorf("unknown command: %s", command)
 	}
-	return beginsTextBlock, nil
+	return textBlockNone, nil
 }
 
 // processInstructions parses one DSL file into output and concatenation state, rejecting recursive includes and returning syntax or I/O errors.
@@ -563,7 +619,7 @@ func processInstructions(instructionsFile string, outputFile *string, itemsToCon
 	scanner := bufio.NewScanner(file)
 	// Permit generated SQL text while retaining a bounded per-line memory limit.
 	scanner.Buffer(make([]byte, 64*1024), maximumInputLineBytes)
-	inTextBlock := false
+	currentTextBlockMode := textBlockNone
 	var textBlock strings.Builder
 
 	conditionStack := conditionalStack{}
@@ -574,17 +630,19 @@ func processInstructions(instructionsFile string, outputFile *string, itemsToCon
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		if inTextBlock {
+		if currentTextBlockMode != textBlockNone {
 			textEndCommand := "text-end"
 			if currentPrefix != "" {
 				textEndCommand = currentPrefix + ":text-end"
 			}
 
 			if strings.TrimSpace(line) == textEndCommand {
-				*itemsToConcat = append(*itemsToConcat, ConcatItem{IsFile: false, ContentOrPath: substituteParams(textBlock.String(), parameters)})
-				inTextBlock = false
+				if currentTextBlockMode == textBlockOutput {
+					*itemsToConcat = append(*itemsToConcat, ConcatItem{IsFile: false, ContentOrPath: substituteParams(textBlock.String(), parameters)})
+				}
+				currentTextBlockMode = textBlockNone
 				textBlock.Reset()
-			} else {
+			} else if currentTextBlockMode == textBlockOutput {
 				textBlock.WriteString(line + "\n")
 			}
 			continue
@@ -595,14 +653,14 @@ func processInstructions(instructionsFile string, outputFile *string, itemsToCon
 			continue
 		}
 
-		beginsTextBlock, err := dispatchCommand(trimmedLine, resolvedInstructionsFile, outputFile, itemsToConcat, parameters, baseDir, &currentPrefix, &conditionStack, &shouldSkip, activeIncludes)
+		newTextBlockMode, err := dispatchCommand(trimmedLine, resolvedInstructionsFile, outputFile, itemsToConcat, parameters, baseDir, &currentPrefix, &conditionStack, &shouldSkip, activeIncludes)
 		if err != nil {
 			return err
 		}
-		inTextBlock = beginsTextBlock
+		currentTextBlockMode = newTextBlockMode
 	}
 
-	if inTextBlock {
+	if currentTextBlockMode != textBlockNone {
 		return fmt.Errorf("unclosed text block")
 	}
 

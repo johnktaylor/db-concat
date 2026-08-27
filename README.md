@@ -23,8 +23,8 @@ To run the script, you need to create an instruction file (e.g., `instructions.d
 **Options:**
 
 *   `--param-file <filename>`: Comma-separated list of parameter files (key=value per line). Parameters loaded from these files have the lowest precedence.
-*   `--param <key>=<value>`: Key-value pair parameter with a non-empty key. Can be specified multiple times. Invalid values fail fast. These parameters have the highest precedence, overriding both parameter files and DSL `param` commands.
-*   `--output <filename>`: Specifies the output file path. If not specified, output goes to `stdout`. This overrides the `output` DSL command.
+*   `--param <key>=<value>`: Key-value pair parameter whose key contains at least one non-whitespace character. Surrounding key whitespace is removed. Can be specified multiple times. Invalid values fail fast. These parameters have the highest precedence, overriding both parameter files and DSL `param` commands.
+*   `--output <filename>`: Specifies the output file path. If not specified, output goes to `stdout`. This overrides the `output` DSL command. File output preserves an existing destination's permissions; a new destination uses `0644` permissions on Unix-like systems.
 
 ## DSL Commands
 
@@ -56,7 +56,7 @@ Parameters can be defined and overridden at different levels, with the following
 4.  **`--param-file`:** Parameters loaded from specified files have the lowest precedence.
 
 **Parameter Substitution:**
-Parameters can be used within DSL command arguments using the `${KEY}` syntax (e.g., `concat ${MY_FILE}.sql`, `emit Hello ${MY_VAR}`). Substitution is performed when each command is processed, using the current parameter values at that point in execution. Later parameter updates do not retroactively change already-processed commands.
+Parameters can be used within DSL command arguments using the `${KEY}` syntax (e.g., `concat ${MY_FILE}.sql`, `emit Hello ${MY_VAR}`). Substitution is performed when each command is processed, using the current parameter values at that point in execution. Each placeholder in the original command text is considered once; a placeholder introduced by a parameter value remains literal rather than being expanded recursively. Later parameter updates do not retroactively change already-processed commands.
 
 ## Conditional Logic
 

@@ -2,10 +2,10 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 )
 
@@ -22,6 +22,7 @@ type integrationTestCase struct {
 	stderrFile      string
 	expectedError   string
 	preservedOutput string
+	expectedMode    os.FileMode
 }
 
 // main builds the executable, runs all integration cases, reports their results, and exits nonzero when any fail.
@@ -33,6 +34,16 @@ func main() {
 	executablePath := ".\\" + executableName
 	if runtime.GOOS != "windows" {
 		executablePath = "./" + executableName
+	}
+	generatedTestFiles := []string{
+		executablePath,
+		"tests/output_cli_output_precedence.sql",
+		"tests/output_concat_literal_atat.sql",
+		"tests/output_inactive_prefix.sql",
+		"tests/output_inactive_text_block.sql",
+		"tests/output_non_recursive_substitution.sql",
+		"tests/output_param_overrides_file.sql",
+		"tests/output_preserve_on_error.sql",
 	}
 
 	fmt.Println("Building db-concat...")
@@ -72,6 +83,20 @@ func main() {
 			shouldFail:    true,
 			expectedError: "Invalid --param value",
 			args:          []string{"--param", "INVALID"},
+		},
+		{
+			name:          "Invalid whitespace-only command-line parameter key",
+			instructions:  "tests/instructions_output.dsl",
+			shouldFail:    true,
+			expectedError: "Invalid --param value",
+			args:          []string{"--param", "   =value"},
+		},
+		{
+			name:         "Parameter substitution is non-recursive",
+			instructions: "tests/instructions_non_recursive_substitution.dsl",
+			output:       "tests/output_non_recursive_substitution.sql",
+			expectedText: "${SECOND}",
+			args:         []string{"--param", "FIRST=${SECOND}", "--param", "SECOND=expanded"},
 		},
 		{
 			name:          "Invalid empty DSL param key",
@@ -135,6 +160,7 @@ func main() {
 			output:       "tests/output_file.sql",
 			expected:     "tests/expected_output_file.sql",
 			args:         []string{"--output", "tests/output_file.sql"},
+			expectedMode: 0644,
 		},
 		{
 			name:         "Command-line output overrides DSL output",
@@ -229,6 +255,12 @@ func main() {
 			instructions: "tests/instructions_inactive_prefix.dsl",
 			output:       "tests/output_inactive_prefix.sql",
 			expectedText: "SELECT 1;",
+		},
+		{
+			name:         "Inactive text block discards control-like text",
+			instructions: "tests/instructions_inactive_text_block.dsl",
+			output:       "tests/output_inactive_text_block.sql",
+			expectedText: "active-else",
 		},
 		{
 			name:         "Processing-time substitution",
@@ -380,33 +412,38 @@ func main() {
 		testCommand := exec.Command(executablePath, commandArguments...)
 
 		var stdout, stderr bytes.Buffer
+		var stdoutCaptureFile, stderrCaptureFile *os.File
 		if testCase.stdoutFile != "" {
-			stdoutCaptureFile, err := os.Create(testCase.stdoutFile)
+			stdoutCaptureFile, err = os.Create(testCase.stdoutFile)
 			if err != nil {
 				fmt.Printf("Failed to create stdout file: %s\n", err)
 				failedTests++
 				continue
 			}
-			defer stdoutCaptureFile.Close()
 			testCommand.Stdout = stdoutCaptureFile
 		} else {
 			testCommand.Stdout = &stdout
 		}
 
 		if testCase.stderrFile != "" {
-			stderrCaptureFile, err := os.Create(testCase.stderrFile)
+			stderrCaptureFile, err = os.Create(testCase.stderrFile)
 			if err != nil {
+				closeCaptureFiles(stdoutCaptureFile)
 				fmt.Printf("Failed to create stderr file: %s\n", err)
 				failedTests++
 				continue
 			}
-			defer stderrCaptureFile.Close()
 			testCommand.Stderr = stderrCaptureFile
 		} else {
 			testCommand.Stderr = &stderr
 		}
 
 		err := testCommand.Run()
+		if closeErr := closeCaptureFiles(stdoutCaptureFile, stderrCaptureFile); closeErr != nil {
+			fmt.Printf("Failed to close captured output: %s\n", closeErr)
+			failedTests++
+			continue
+		}
 
 		if testCase.shouldFail {
 			if err == nil {
@@ -463,6 +500,9 @@ func main() {
 				} else {
 					comparisonError = compareFiles(outputFilePath, testCase.expected)
 				}
+				if comparisonError == nil && testCase.expectedMode != 0 && runtime.GOOS != "windows" {
+					comparisonError = compareFileMode(outputFilePath, testCase.expectedMode)
+				}
 				if comparisonError != nil {
 					fmt.Printf("Test FAILED: %s\n", comparisonError)
 					failedTests++
@@ -478,12 +518,50 @@ func main() {
 	fmt.Printf("Failed tests: %d\n", failedTests)
 
 	fmt.Println("\nCleaning up generated test output files...")
-	// cleanup()
+	if err := removeGeneratedTestFiles(generatedTestFiles); err != nil {
+		fmt.Printf("Cleanup failed: %s\n", err)
+		failedTests++
+	}
 
 	// Return a failing process status when any integration case did not meet its expectation.
 	if failedTests > 0 {
 		os.Exit(1)
 	}
+}
+
+// closeCaptureFiles closes non-nil output capture files and returns the first close error.
+func closeCaptureFiles(captureFiles ...*os.File) error {
+	var firstCloseError error
+	for _, captureFile := range captureFiles {
+		if captureFile == nil {
+			continue
+		}
+		if err := captureFile.Close(); err != nil && firstCloseError == nil {
+			firstCloseError = err
+		}
+	}
+	return firstCloseError
+}
+
+// removeGeneratedTestFiles removes only the transient files created by this test runner and returns the first deletion error.
+func removeGeneratedTestFiles(generatedFiles []string) error {
+	for _, generatedFile := range generatedFiles {
+		if err := os.Remove(generatedFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("error removing generated test file %s: %w", generatedFile, err)
+		}
+	}
+	return nil
+}
+// compareFileMode compares a file's permission bits with expectedMode and returns an I/O or mismatch error.
+func compareFileMode(filename string, expectedMode os.FileMode) error {
+	fileInfo, err := os.Stat(filename)
+	if err != nil {
+		return fmt.Errorf("error inspecting file %s: %v", filename, err)
+	}
+	if fileInfo.Mode().Perm() != expectedMode.Perm() {
+		return fmt.Errorf("permission mismatch for %s: got %04o, expected %04o", filename, fileInfo.Mode().Perm(), expectedMode.Perm())
+	}
+	return nil
 }
 
 // compareFileToText compares a file with exact expected text and returns an I/O or mismatch error.
@@ -517,20 +595,4 @@ func compareFiles(file1, file2 string) error {
 		return fmt.Errorf("output mismatch between %s and %s", file1, file2)
 	}
 	return nil
-}
-
-// cleanup removes generated test outputs and reports glob errors without returning a value.
-func cleanup() {
-	files, err := filepath.Glob("tests/output_*")
-	if err != nil {
-		fmt.Printf("Error finding files to clean up: %v\n", err)
-	}
-	errorFiles, err := filepath.Glob("tests/error_*")
-	if err != nil {
-		fmt.Printf("Error finding files to clean up: %v\n", err)
-	}
-	files = append(files, errorFiles...)
-	for _, file := range files {
-		os.Remove(file)
-	}
 }
