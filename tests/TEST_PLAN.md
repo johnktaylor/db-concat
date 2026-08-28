@@ -1,6 +1,6 @@
 # Test Plan for db-concat
 
-This plan documents the automated integration cases in `tests/run_tests.go`, which are executed by Go's `TestIntegrationSuite` in `tests/run_tests_test.go`. Each case builds `db-concat`, invokes it with the listed fixture category, and checks the stated result. File-content assertions compare the generated result with the corresponding `expected_*` fixture unless noted otherwise.
+This plan documents the native Go tests in `db-concat_test.go`. Each scenario is an independently selectable test that invokes the application in-process and checks the stated result. File-content assertions compare temporary generated results with the corresponding read-only `expected_*` fixture unless noted otherwise. Fixture paths use portable forward slashes so the suite behaves consistently on Windows and Linux.
 
 ## Running the Suite
 
@@ -10,7 +10,11 @@ Run the suite from the project root:
 go test ./...
 ```
 
-The Go test invokes the runner from the project root. The runner writes its normal fixture outputs, captures stdout or stderr where required, checks expected failures, and removes only its explicitly listed transient artifacts.
+The tests use `testing.T.TempDir` for generated files, so running the suite does not modify repository fixtures or require a cleanup pass.
+
+## Native Go Tests
+
+`db-concat_test.go` exercises the callable CLI entry point in-process. The tests are individually selectable with `go test -run <TestName>` and contribute directly to code coverage and race detection.
 
 ## Test Cases
 
@@ -63,7 +67,9 @@ The Go test invokes the runner from the project root. The runner writes its norm
 | 45 | Invalid `endif` syntax | `instructions_invalid_endif.dsl` | Fails with `invalid endif command format`. |
 | 46 | Invalid `text-begin` syntax | `instructions_invalid_text_begin.dsl` | Fails with `invalid text-begin command format`. |
 | 47 | Invalid `set-prefix` syntax | `instructions_invalid_set_prefix.dsl` | Fails with `invalid set-prefix command format`. |
+| 48 | Help | `--help` | Prints usage and succeeds. |
+| 49 | Invalid flag | An unknown command-line flag | Reports the flag error once and fails. |
 
 ## Coverage Maintenance
 
-`tests/run_tests.go` is the source of truth for integration cases, and `tests/run_tests_test.go` exposes them to standard Go tooling. When a case is added, removed, or changed, update this table in the same change so that the case count, scenario, and expected result remain accurate.
+`db-concat_test.go` is the source of truth for automated cases. When a test is added, removed, or changed, update this table in the same change so that the case count, scenario, and expected result remain accurate.

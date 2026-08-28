@@ -1,1 +1,1 @@
-concat ..\1.sql
+concat ../1.sql

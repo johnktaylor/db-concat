@@ -1,1 +1,1 @@
-concat ..\${CLI_VAR}.sql
+concat ../${CLI_VAR}.sql

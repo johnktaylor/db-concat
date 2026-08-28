@@ -132,4 +132,4 @@ Run the automated test suite from the project root:
 go test ./...
 ```
 
-The Go test suite runs the integration harness, which builds the `db-concat` executable and executes all defined cases. Use `go test -v ./...` to display each case's output.
+Each scenario is a distinct native Go test that invokes the application in-process and uses temporary output locations. Use `go test -v ./...` to display each test name and result.

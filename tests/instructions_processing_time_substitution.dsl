@@ -5,11 +5,11 @@ ${VALUE}
 text-end
 print VALUE
 emit @@n
-param FILE=..\1.sql
+param FILE=../1.sql
 concat ${FILE}
 emit @@n
 set VALUE=two
-set FILE=..\2.sql
+set FILE=../2.sql
 emit ${VALUE}@@n
 text-begin
 ${VALUE}

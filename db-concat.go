@@ -31,35 +31,45 @@ type ConcatItem struct {
 	BaseDir       string // Base directory used to resolve relative source-file paths.
 }
 
-var (
-	parameterFileList          string
-	commandLineParameterValues stringList
-	commandLineOutputFile      string
-	commandLineParameterNames  map[string]bool // Tracks parameters set by CLI --param.
-	dslSetParameterNames       map[string]bool // Tracks parameters established by higher-precedence DSL set commands.
-)
-
-// init registers command-line options and initializes global precedence state; it has no return value.
-func init() {
-	flag.StringVar(&parameterFileList, "param-file", "", "Comma-separated list of parameter files (key=value per line)")
-	flag.Var(&commandLineParameterValues, "param", "Key-value pair parameter (e.g., --param key=value). Can be specified multiple times.")
-	flag.StringVar(&commandLineOutputFile, "output", "", "Output file path. If not specified, output goes to stdout.")
-	commandLineParameterNames = make(map[string]bool)
-	dslSetParameterNames = make(map[string]bool)
+type executionState struct {
+	commandLineParameterNames map[string]bool
+	dslSetParameterNames      map[string]bool
 }
 
-// main parses inputs, builds the concatenation plan, writes the requested output, and exits nonzero on failure.
-func main() {
-	// Parse flags before establishing the precedence-aware parameter state.
-	flag.Parse()
+var errCommandLineAlreadyReported = errors.New("command-line error already reported")
 
-	if flag.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "Usage: db-concat [OPTIONS] <instructions_file>")
-		flag.PrintDefaults()
+// main runs the command-line application and exits nonzero after reporting an execution error.
+func main() {
+	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
+		if !errors.Is(err, errCommandLineAlreadyReported) {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		os.Exit(1)
 	}
+}
 
-	instructionsFile := flag.Arg(0)
+// run parses arguments, builds the concatenation plan, writes output, and returns validation, processing, or I/O errors.
+func run(arguments []string, standardOutput io.Writer, standardError io.Writer) error {
+	commandFlags := flag.NewFlagSet("db-concat", flag.ContinueOnError)
+	commandFlags.SetOutput(standardError)
+	parameterFileList := commandFlags.String("param-file", "", "Comma-separated list of parameter files (key=value per line)")
+	var commandLineParameterValues stringList
+	commandFlags.Var(&commandLineParameterValues, "param", "Key-value pair parameter (e.g., --param key=value). Can be specified multiple times.")
+	commandLineOutputFile := commandFlags.String("output", "", "Output file path. If not specified, output goes to stdout.")
+	if err := commandFlags.Parse(arguments); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return fmt.Errorf("%w: %v", errCommandLineAlreadyReported, err)
+	}
+
+	if commandFlags.NArg() != 1 {
+		fmt.Fprintln(standardError, "Usage: db-concat [OPTIONS] <instructions_file>")
+		commandFlags.PrintDefaults()
+		return fmt.Errorf("expected exactly one instructions file")
+	}
+
+	instructionsFile := commandFlags.Arg(0)
 	instructionsDir := filepath.Dir(instructionsFile)
 	if instructionsDir == "" {
 		instructionsDir = "."
@@ -67,58 +77,55 @@ func main() {
 	parameters := make(map[string]string)
 
 	// Load parameters from files (lowest precedence)
-	if parameterFileList != "" {
-		parameterFiles := strings.Split(parameterFileList, ",")
+	if *parameterFileList != "" {
+		parameterFiles := strings.Split(*parameterFileList, ",")
 		for _, parameterFile := range parameterFiles {
 			err := loadParamsFromFile(parameterFile, parameters)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error loading parameters from file %s: %v\n", parameterFile, err)
-				os.Exit(1)
+				return fmt.Errorf("Error loading parameters from file %s: %w", parameterFile, err)
 			}
 		}
 	}
 
 	// Load parameters from command line (highest precedence) before processing DSL instructions
 	// Apply CLI values before DSL parsing so DSL commands cannot override them.
+	state := executionState{commandLineParameterNames: make(map[string]bool), dslSetParameterNames: make(map[string]bool)}
 	for _, parameterArgument := range commandLineParameterValues {
 		parameterName, parameterValue, isValid := parseParameterAssignment(parameterArgument)
 		if !isValid {
-			fmt.Fprintf(os.Stderr, "Invalid --param value %q: expected key=value with a non-empty key\n", parameterArgument)
-			os.Exit(1)
+			return fmt.Errorf("Invalid --param value %q: expected key=value with a non-empty key", parameterArgument)
 		}
 		parameters[parameterName] = parameterValue
-		commandLineParameterNames[parameterName] = true
+		state.commandLineParameterNames[parameterName] = true
 	}
 
 	var dslOutputFile string
 	var itemsToConcat []ConcatItem
 
 	activeIncludes := make(map[string]bool)
-	err := processInstructions(instructionsFile, &dslOutputFile, &itemsToConcat, parameters, instructionsDir, activeIncludes)
+	err := processInstructions(instructionsFile, &dslOutputFile, &itemsToConcat, parameters, instructionsDir, activeIncludes, &state)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error processing instructions: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("Error processing instructions: %w", err)
 	}
 
 	finalOutputFile := dslOutputFile
 	// An explicit CLI destination overrides the instruction-file default.
-	if commandLineOutputFile != "" {
-		finalOutputFile = commandLineOutputFile
+	if *commandLineOutputFile != "" {
+		finalOutputFile = *commandLineOutputFile
 	}
 
 	// Materialize the complete plan without replacing a file destination until every item succeeds.
-	err = writeOutput(finalOutputFile, itemsToConcat, parameters)
+	err = writeOutput(finalOutputFile, itemsToConcat, parameters, standardOutput)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error writing output: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("Error writing output: %w", err)
 	}
-
+	return nil
 }
 
 // writeOutput writes planned items to stdout or atomically replaces finalOutputFile after a successful file write.
-func writeOutput(finalOutputFile string, itemsToConcat []ConcatItem, parameters map[string]string) error {
+func writeOutput(finalOutputFile string, itemsToConcat []ConcatItem, parameters map[string]string, standardOutput io.Writer) error {
 	if finalOutputFile == "" {
-		return runConcat(os.Stdout, itemsToConcat, parameters)
+		return runConcat(standardOutput, itemsToConcat, parameters)
 	}
 
 	// Preserve an existing destination's permissions, or use a predictable readable default for a new file.
@@ -154,7 +161,7 @@ func writeOutput(finalOutputFile string, itemsToConcat []ConcatItem, parameters 
 		return fmt.Errorf("error replacing output file %s: %v", finalOutputFile, err)
 	}
 
-	fmt.Fprintln(os.Stdout, "Successfully concatenated files to output.")
+	fmt.Fprintln(standardOutput, "Successfully concatenated files to output.")
 	return nil
 }
 
@@ -439,7 +446,7 @@ func handleConcatCommand(arguments string, itemsToConcat *[]ConcatItem, baseDir 
 }
 
 // handleIncludeCommand resolves and processes an included DSL file, updating shared output, items, parameters, and include state.
-func handleIncludeCommand(arguments string, currentInstructionsFile string, outputFile *string, itemsToConcat *[]ConcatItem, parameters map[string]string, baseDir string, activeIncludes map[string]bool) error {
+func handleIncludeCommand(arguments string, currentInstructionsFile string, outputFile *string, itemsToConcat *[]ConcatItem, parameters map[string]string, baseDir string, activeIncludes map[string]bool, state *executionState) error {
 	if strings.TrimSpace(arguments) == "" {
 		return fmt.Errorf("invalid include command format: missing filename")
 	}
@@ -451,7 +458,7 @@ func handleIncludeCommand(arguments string, currentInstructionsFile string, outp
 		}
 		includePath = absPath
 	}
-	err := processInstructions(includePath, outputFile, itemsToConcat, parameters, filepath.Dir(includePath), activeIncludes)
+	err := processInstructions(includePath, outputFile, itemsToConcat, parameters, filepath.Dir(includePath), activeIncludes, state)
 	if err != nil {
 		return err
 	}
@@ -459,7 +466,7 @@ func handleIncludeCommand(arguments string, currentInstructionsFile string, outp
 }
 
 // handleParamCommand defines a DSL parameter unless a CLI parameter or DSL set command has higher precedence.
-func handleParamCommand(arguments string, parameters map[string]string) error {
+func handleParamCommand(arguments string, parameters map[string]string, state *executionState) error {
 	parameterName, parameterValue, isValid := parseParameterAssignment(arguments)
 	if isValid {
 
@@ -467,7 +474,7 @@ func handleParamCommand(arguments string, parameters map[string]string) error {
 		substitutedValue := substituteParams(parameterValue, parameters)
 
 		// Preserve only higher-precedence values; parameter-file values are defaults that param may replace.
-		if !commandLineParameterNames[parameterName] && !dslSetParameterNames[parameterName] {
+		if !state.commandLineParameterNames[parameterName] && !state.dslSetParameterNames[parameterName] {
 			parameters[parameterName] = substitutedValue
 		}
 	} else {
@@ -477,7 +484,7 @@ func handleParamCommand(arguments string, parameters map[string]string) error {
 }
 
 // handleSetCommand assigns a DSL parameter unless it originated from the CLI, returning invalid-assignment errors.
-func handleSetCommand(arguments string, parameters map[string]string) error {
+func handleSetCommand(arguments string, parameters map[string]string, state *executionState) error {
 	parameterName, parameterValue, isValid := parseParameterAssignment(arguments)
 	if isValid {
 
@@ -485,9 +492,9 @@ func handleSetCommand(arguments string, parameters map[string]string) error {
 		substitutedValue := substituteParams(parameterValue, parameters)
 
 		// Only set the parameter if it was NOT set by a CLI --param flag
-		if _, isCommandLineParameter := commandLineParameterNames[parameterName]; !isCommandLineParameter {
+		if _, isCommandLineParameter := state.commandLineParameterNames[parameterName]; !isCommandLineParameter {
 			parameters[parameterName] = substitutedValue
-			dslSetParameterNames[parameterName] = true
+			state.dslSetParameterNames[parameterName] = true
 		}
 	} else {
 		return fmt.Errorf("invalid set command format: %s", arguments)
@@ -514,7 +521,7 @@ func handleEmitCommand(arguments string, itemsToConcat *[]ConcatItem, parameters
 }
 
 // dispatchCommand executes one normalized DSL line and returns its text-block mode or an error.
-func dispatchCommand(line string, instructionsFile string, outputFile *string, itemsToConcat *[]ConcatItem, parameters map[string]string, baseDir string, currentPrefix *string, conditionalStack *conditionalStack, shouldSkip *bool, activeIncludes map[string]bool) (textBlockMode, error) {
+func dispatchCommand(line string, instructionsFile string, outputFile *string, itemsToConcat *[]ConcatItem, parameters map[string]string, baseDir string, currentPrefix *string, conditionalStack *conditionalStack, shouldSkip *bool, activeIncludes map[string]bool, state *executionState) (textBlockMode, error) {
 	prefixIsActive := *currentPrefix != ""
 	if prefixIsActive {
 		prefixWithColon := *currentPrefix + ":"
@@ -573,11 +580,11 @@ func dispatchCommand(line string, instructionsFile string, outputFile *string, i
 		}
 		handleConcatCommand(arguments, itemsToConcat, baseDir, parameters)
 	case "include":
-		return textBlockNone, handleIncludeCommand(arguments, instructionsFile, outputFile, itemsToConcat, parameters, baseDir, activeIncludes)
+		return textBlockNone, handleIncludeCommand(arguments, instructionsFile, outputFile, itemsToConcat, parameters, baseDir, activeIncludes, state)
 	case "param":
-		return textBlockNone, handleParamCommand(arguments, parameters)
+		return textBlockNone, handleParamCommand(arguments, parameters, state)
 	case "set":
-		return textBlockNone, handleSetCommand(arguments, parameters)
+		return textBlockNone, handleSetCommand(arguments, parameters, state)
 	case "print":
 		return textBlockNone, handlePrintCommand(arguments, itemsToConcat, parameters)
 	case "emit":
@@ -594,7 +601,7 @@ func dispatchCommand(line string, instructionsFile string, outputFile *string, i
 }
 
 // processInstructions parses one DSL file into output and concatenation state, rejecting recursive includes and returning syntax or I/O errors.
-func processInstructions(instructionsFile string, outputFile *string, itemsToConcat *[]ConcatItem, parameters map[string]string, baseDir string, activeIncludes map[string]bool) error {
+func processInstructions(instructionsFile string, outputFile *string, itemsToConcat *[]ConcatItem, parameters map[string]string, baseDir string, activeIncludes map[string]bool, state *executionState) error {
 	resolvedInstructionsFile, err := filepath.Abs(instructionsFile)
 	if err != nil {
 		return fmt.Errorf("error resolving instructions file %s: %v", instructionsFile, err)
@@ -653,7 +660,7 @@ func processInstructions(instructionsFile string, outputFile *string, itemsToCon
 			continue
 		}
 
-		newTextBlockMode, err := dispatchCommand(trimmedLine, resolvedInstructionsFile, outputFile, itemsToConcat, parameters, baseDir, &currentPrefix, &conditionStack, &shouldSkip, activeIncludes)
+		newTextBlockMode, err := dispatchCommand(trimmedLine, resolvedInstructionsFile, outputFile, itemsToConcat, parameters, baseDir, &currentPrefix, &conditionStack, &shouldSkip, activeIncludes, state)
 		if err != nil {
 			return err
 		}
