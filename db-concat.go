@@ -115,7 +115,7 @@ func run(arguments []string, standardOutput io.Writer, standardError io.Writer) 
 	}
 
 	// Materialize the complete plan without replacing a file destination until every item succeeds.
-	err = writeOutput(finalOutputFile, itemsToConcat, parameters, standardOutput)
+	err = writeOutput(finalOutputFile, itemsToConcat, standardOutput)
 	if err != nil {
 		return fmt.Errorf("Error writing output: %w", err)
 	}
@@ -123,9 +123,9 @@ func run(arguments []string, standardOutput io.Writer, standardError io.Writer) 
 }
 
 // writeOutput writes planned items to stdout or atomically replaces finalOutputFile after a successful file write.
-func writeOutput(finalOutputFile string, itemsToConcat []ConcatItem, parameters map[string]string, standardOutput io.Writer) error {
+func writeOutput(finalOutputFile string, itemsToConcat []ConcatItem, standardOutput io.Writer) error {
 	if finalOutputFile == "" {
-		return runConcat(standardOutput, itemsToConcat, parameters)
+		return runConcat(standardOutput, itemsToConcat)
 	}
 
 	// Preserve an existing destination's permissions, or use a predictable readable default for a new file.
@@ -151,7 +151,7 @@ func writeOutput(finalOutputFile string, itemsToConcat []ConcatItem, parameters 
 		return fmt.Errorf("error setting permissions on temporary output file %s: %v", temporaryOutputPath, err)
 	}
 
-	if err := runConcat(temporaryOutput, itemsToConcat, parameters); err != nil {
+	if err := runConcat(temporaryOutput, itemsToConcat); err != nil {
 		return err
 	}
 	if err := temporaryOutput.Close(); err != nil {
@@ -679,7 +679,7 @@ func processInstructions(instructionsFile string, outputFile *string, itemsToCon
 }
 
 // runConcat writes each planned file or text item to outputWriter and returns any read, copy, or write error.
-func runConcat(outputWriter io.Writer, itemsToConcat []ConcatItem, parameters map[string]string) error {
+func runConcat(outputWriter io.Writer, itemsToConcat []ConcatItem) error {
 	// Resolve and write each planned item in DSL order.
 	for _, concatItem := range itemsToConcat {
 		if concatItem.IsFile {
