@@ -1,7 +1,7 @@
 # This is a comment and should be ignored
 
-1.sql
+concat 1.sql
 
 # Another commented line
-2.sql
-3.sql
+concat 2.sql
+concat 3.sql

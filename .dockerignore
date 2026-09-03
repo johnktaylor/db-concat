@@ -1,0 +1,9 @@
+.git
+*.exe
+*.test
+*.out
+*.tmp
+db-concat
+concatenated_from_dsl_with_text.sql
+tests/
+ISSUES.csv

@@ -23,8 +23,8 @@ The tests use `testing.T.TempDir` for generated files, so running the suite does
 | 1 | Parameter files | `instructions_param_file.dsl` with `--param-file params.txt` | File parameters substitute into command arguments. |
 | 2 | DSL `param` overrides parameter file | `instructions_param_overrides_file.dsl` with `--param-file params_param_override.txt` | The DSL value is emitted. |
 | 3 | Command-line parameters | `instructions_cli_param.dsl` with `--param CLI_VAR=1` | CLI parameter substitutes into the concat path. |
-| 4 | Invalid command-line parameter | `--param INVALID` | Fails with `Invalid --param value`. |
-| 5 | Whitespace-only command-line parameter key | `--param "   =value"` | Fails with `Invalid --param value`. |
+| 4 | Invalid command-line parameter | `--param INVALID` | Fails with `invalid --param value`. |
+| 5 | Whitespace-only command-line parameter key | `--param "   =value"` | Fails with `invalid --param value`. |
 | 6 | Non-recursive substitution | `instructions_non_recursive_substitution.dsl` with `FIRST=${SECOND}` and `SECOND=expanded` | Outputs the literal `${SECOND}` introduced by `FIRST`. |
 | 7 | Empty DSL `param` key | `instructions_invalid_param_empty_key.dsl` | Fails with `invalid param command format`. |
 | 8 | Empty DSL `set` key | `instructions_invalid_set_empty_key.dsl` | Fails with `invalid set command format`. |
@@ -69,6 +69,26 @@ The tests use `testing.T.TempDir` for generated files, so running the suite does
 | 47 | Invalid `set-prefix` syntax | `instructions_invalid_set_prefix.dsl` | Fails with `invalid set-prefix command format`. |
 | 48 | Help | `--help` | Prints usage and succeeds. |
 | 49 | Invalid flag | An unknown command-line flag | Reports the flag error once and fails. |
+| 50 | Parameter file whitespace and empty entries | `--param-file` with spaces and empty comma entries | Skips empty entries and trims whitespace around file paths. |
+| 51 | Stdout buffering on failure | `instructions_output_failure.dsl` in stdout mode | Leaves standard output empty when mid-run concatenation fails. |
+| 52 | Literal `@@` escape (`@@@@`) | DSL with `@@@@` escape sequences in emit, print, and text block | Decodes `@@@@` to literal `@@` before other escape substitutions. |
+| 53 | Condition whitespace, `!=` operator, and empty key validation | DSL with spaces around operators, `!=`, empty key, and missing key | Trims key and value, supports `!=`, treats missing key as false, and rejects empty key. |
+| 54 | Handlers reject empty arguments | Calling `handleOutputCommand` and `handleConcatCommand` with empty string | Returns error instead of panicking. |
+| 55 | Command arguments whitespace trimming | DSL with extra spaces between command and argument | Trims argument leading and trailing whitespace consistently. |
+| 56 | File and line error context in DSL and includes | Parent DSL including child DSL with an unknown command | Reports errors in `file:line:` format and wraps include hierarchy. |
+| 57 | Scanner error checked before unclosed block | DSL with >1 MiB line inside a `text-begin` block | Surfaces `token too long` error with file and line rather than `unclosed text block`. |
+| 58 | Error wrapping sentinel checks | DSL including a nonexistent file | Preserves sentinel errors through wrapped error chains so `errors.Is(err, os.ErrNotExist)` succeeds. |
+| 59 | Multiple parameter files with overlapping keys | `--param-file` with multiple comma-separated files | Later file values overwrite earlier files for overlapping keys while preserving unique keys. |
+| 60 | Prefix scoping across includes | Prefixed parent DSL including child DSL | Child DSL runs unprefixed by default, and parent prefix is restored upon returning from include. |
+| 61 | Child-to-parent parameter propagation | Parent DSL including child DSL defining/setting parameters | Parameters created or modified in the child via `param` and `set` are retained and visible in the parent. |
+| 62 | `print` command escape decoding | DSL with `print` command targeting parameter containing `@@` escape sequences | Decodes `@@` sequences (`@@n`, `@@t`, `@@s`, `@@@@`) in parameter value when writing output. |
+| 63 | Missing include file error context | DSL including a nonexistent file | Reports failure with parent file and line context, include target name, and preserves `os.ErrNotExist`. |
+| 64 | Diamond include | DSL including the same file sequentially and across multiple include branches | Successfully processes each inclusion without falsely triggering cycle detection. |
+| 65 | Top-level line length limit | Top-level line exceeding 1 MiB | Fails with scanner `token too long` error reporting file and line number. |
+| 66 | Nonexistent parameter file | `--param-file` pointing to a nonexistent file | Fails with error reporting missing file and preserving `os.ErrNotExist`. |
+| 67 | Nonexistent output directory | `--output` targeting a nonexistent directory | Fails with error creating temporary output file and preserving `os.ErrNotExist`. |
+| 68 | Output overwrite preserves permissions | `--output` targeting an existing file | Overwrites output file with new content while preserving pre-existing file permissions. |
+| 69 | Bare `emit` without arguments | DSL containing `emit` with no arguments | Emits an empty string without error. |
 
 ## Coverage Maintenance
 

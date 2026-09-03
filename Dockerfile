@@ -1,5 +1,5 @@
 # Use the official Go image as a base
-FROM golang:1-alpine
+FROM golang:1.22-alpine
 
 # Set the working directory inside the container
 WORKDIR /app
@@ -12,6 +12,9 @@ COPY db-concat.go ./
 # Build the db-concat application
 # We build it as 'db-concat' (no .exe extension) for Linux environment
 RUN go build -o db-concat
+
+# Run as non-root user
+USER nobody
 
 # Set the entrypoint to the db-concat executable
 ENTRYPOINT ["./db-concat"]
